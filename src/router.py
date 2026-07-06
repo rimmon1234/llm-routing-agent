@@ -25,12 +25,20 @@ class RouterCache:
         except Exception as e:
             print(f"   [Cache] Warning: Failed to write cache file: {e}")
 
+    def _normalize_query(self, query: str) -> str:
+        import re
+        q = query.strip().lower()
+        q = re.sub(r'\s+', ' ', q)
+        return q
+
     def get(self, query: str, strategy: str, response_format: str, schema: str = None) -> dict:
-        key = f"{query.strip()}||{strategy}||{response_format}||{schema or ''}"
+        normalized_query = self._normalize_query(query)
+        key = f"{normalized_query}||{strategy}||{response_format}||{schema or ''}"
         return self.cache.get(key)
 
     def set(self, query: str, strategy: str, response_format: str, schema: str, entry: dict):
-        key = f"{query.strip()}||{strategy}||{response_format}||{schema or ''}"
+        normalized_query = self._normalize_query(query)
+        key = f"{normalized_query}||{strategy}||{response_format}||{schema or ''}"
         self.cache[key] = entry
         self._save_cache()
 
@@ -62,12 +70,18 @@ class HybridRouter:
         start_time = time.perf_counter()
         schema_str = str(schema) if schema is not None else None
 
+        # Cap retries for small models (1b or 3b) to prevent local resource spikes
+        model_lower = self.client.local_model.lower()
+        if "1b" in model_lower or "3b" in model_lower:
+            max_retries = min(max_retries, 1)
+
         if not no_cache:
             cached_result = self.cache.get(query, strategy, response_format, schema_str)
             if cached_result:
                 # Return copy with cached flag set to True
                 result = cached_result.copy()
                 result["cached"] = True
+                result["latency_sec"] = time.perf_counter() - start_time
                 return result
 
         result = {
@@ -115,7 +129,7 @@ class HybridRouter:
             is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
             
             # Local Self-Correction (Retry Loop)
-            if not is_valid and max_retries > 0:
+            if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
                 print(f"   [Router] Local validation failed ({error_reason}). Initiating local repair loop...")
                 for attempt in range(1, max_retries + 1):
                     time.sleep(0.5)  # Cooldown delay to prevent system overload
@@ -169,7 +183,7 @@ class HybridRouter:
 
         elif strategy == "predictive":
             # Step 1: Predict complexity upfront
-            is_complex = self._predict_complexity(query)
+            is_complex = self._predict_complexity(query, response_format)
             
             if is_complex:
                 # Route directly to remote
@@ -189,7 +203,7 @@ class HybridRouter:
                 is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
                 
                 # Local Self-Correction (Retry Loop)
-                if not is_valid and max_retries > 0:
+                if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
                     print(f"   [Router] Local validation failed ({error_reason}). Initiating local repair loop...")
                     for attempt in range(1, max_retries + 1):
                         time.sleep(0.5)  # Cooldown delay to prevent system overload
@@ -245,34 +259,57 @@ class HybridRouter:
 
         return result
 
-    def _predict_complexity(self, query: str) -> bool:
+    def _predict_complexity(self, query: str, response_format: str = "text") -> bool:
         """
-        Combines fast keyword heuristics and a small local model check to predict query complexity.
+        Predicts query complexity using fast, rule-based heuristics to avoid
+        local LLM classification overhead (saving CPU/GPU resources).
         """
-        complex_indicators = [
-            "implement", "optimize", "analyze", "prove", "explain the difference", 
-            "write a python", "complexity of", "architecture", "debug"
-        ]
-        query_lower = query.lower()
-        if any(indicator in query_lower for indicator in complex_indicators):
-            return True
-            
-        if len(query.split()) > 120:
+        # If format is python, route to remote immediately as small local models are not reliable for coding
+        if response_format.lower() == "python":
             return True
 
-        system_prompt = (
-            "You are a routing agent. Classify the user query as either 'SIMPLE' or 'COMPLEX'.\n"
-            "SIMPLE: Conversations, fact retrieval, formatting, greetings, definitions.\n"
-            "COMPLEX: Coding, reasoning, mathematical problems, multi-step tasks.\n"
-            "Response format: Exactly one word (either SIMPLE or COMPLEX)."
-        )
-        try:
-            classification = self.client.call_local(
-                prompt=query,
-                system_prompt=system_prompt,
-                temperature=0.0,
-                max_tokens=5
-            )
-            return "COMPLEX" in classification.strip().upper()
-        except Exception:
-            return False
+        import re
+        query_lower = query.lower()
+        
+        # 1. Check for programming/coding code blocks or tags
+        if "```" in query:
+            return True
+            
+        # 2. Check for long queries (typically require detailed analysis/synthesis)
+        word_count = len(query_lower.split())
+        if word_count > 80:
+            return True
+            
+        # 3. Check for coding/architecture indicators with word boundaries
+        complex_words = [
+            "implement", "optimize", "optimise", "analyze", "analyse", "prove",
+            "debug", "error", "exception", "refactor", "algorithm", "recursive", "recursion",
+            "compile", "dependency", "api", "database", "sql", "regex", "schema"
+        ]
+        # Match word boundaries for indicators
+        for word in complex_words:
+            if re.search(r'\b' + re.escape(word) + r'\b', query_lower):
+                return True
+                
+        # Substring phrases that indicate complexity
+        complex_phrases = [
+            "explain the difference", "write a python", "complexity of", "architecture"
+        ]
+        if any(phrase in query_lower for phrase in complex_phrases):
+            return True
+            
+        # 4. Check for reasoning, math, and logic indicators with word boundaries
+        reasoning_words = [
+            "solve", "calculate", "equation", "formula", "logic", "proof", "prove"
+        ]
+        for word in reasoning_words:
+            if re.search(r'\b' + re.escape(word) + r'\b', query_lower):
+                return True
+                
+        reasoning_phrases = [
+            "step-by-step", "step by step", "compare and contrast", "why does", "how do i"
+        ]
+        if any(phrase in query_lower for phrase in reasoning_phrases):
+            return True
+            
+        return False

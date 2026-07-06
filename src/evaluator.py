@@ -7,6 +7,35 @@ class ResponseEvaluator:
     def __init__(self, client: LLMClient = None):
         self.client = client or LLMClient()
 
+    def _is_echoing_prompt(self, query: str, response: str) -> bool:
+        q = query.strip().lower()
+        r = response.strip().lower()
+        if len(q) > 10 and q in r and len(r) < len(q) * 1.3:
+            return True
+        return False
+
+    def _has_repetition_loops(self, response: str) -> bool:
+        text = response.lower()
+        import re
+        if re.search(r'\b(\w+)(?:\s+\1){3,}\b', text):
+            return True
+        if re.search(r'(.{2,20}?)\1{3,}', text):
+            match = re.search(r'(.{2,20}?)\1{3,}', text)
+            if match and match.group(1).strip() not in ("", "-", "_", "*", "."):
+                return True
+        words = [w for w in text.split() if len(w) > 2]
+        if len(words) > 15:
+            from collections import Counter
+            common = Counter(words).most_common(1)[0]
+            if common[1] / len(words) > 0.4:
+                return True
+        return False
+
+    def _has_placeholders(self, response: str) -> bool:
+        placeholders = ["todo", "[insert", "<insert", "your_code_here", "your name here", "[write your"]
+        r = response.lower()
+        return any(p in r for p in placeholders)
+
     def evaluate(self, query: str, response: str, response_format: str = "text", schema: any = None) -> tuple[bool, str]:
         """
         Runs a suite of checks locally to verify the response quality.
@@ -14,12 +43,22 @@ class ResponseEvaluator:
             tuple: (is_valid: bool, error_reason: str)
         """
         # Basic sanity check
-        if not response or len(response.strip()) < 3:
+        if not response or len(response.strip()) < 5:
             return False, "Response is too short or empty."
 
         # Error checks
         if "error executing local query" in response.lower():
             return False, "Execution error in local pipeline."
+
+        # Advanced stability and quality checks
+        if self._is_echoing_prompt(query, response):
+            return False, "Response echoes the prompt instead of answering it."
+
+        if self._has_repetition_loops(response):
+            return False, "Response contains repetitive loops."
+
+        if self._has_placeholders(response):
+            return False, "Response contains incomplete placeholder markers."
 
         # Format-specific checks
         if response_format.lower() == "json":
@@ -67,6 +106,12 @@ class ResponseEvaluator:
         except ValueError as e:
             return False, str(e)
 
+        # Check for empty JSON structures
+        if isinstance(parsed, dict) and not parsed:
+            return False, "JSON object is empty."
+        if isinstance(parsed, list) and not parsed:
+            return False, "JSON list is empty."
+
         # Apply schema/keys validation if provided
         if schema is not None:
             # 1. Pydantic Model (v2 / v1)
@@ -113,10 +158,14 @@ class ResponseEvaluator:
         return True, ""
 
     def _check_python(self, response: str) -> tuple[bool, str]:
-        """Verifies if the response contains syntactically correct Python code."""
+        """Verifies if the response contains syntactically correct Python code and functional statements."""
         cleaned = self._extract_code_block(response, "python")
         try:
-            ast.parse(cleaned)
+            tree = ast.parse(cleaned)
+            # Ensure it is not just comments/docstrings by walking the AST
+            important_nodes = (ast.FunctionDef, ast.ClassDef, ast.Assign, ast.Call, ast.For, ast.While, ast.If)
+            if not any(isinstance(node, important_nodes) for node in ast.walk(tree)):
+                return False, "Python code contains no functional statements (e.g. definitions, assignments, calls)."
             return True, ""
         except SyntaxError as e:
             return False, f"Line {e.lineno}: {e.msg}"
