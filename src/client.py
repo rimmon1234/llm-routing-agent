@@ -1,4 +1,5 @@
 import os
+import tiktoken
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -41,6 +42,19 @@ class LLMClient:
         
         # Remote model pricing per 1M tokens (defaults to $0.90 per 1M tokens for Llama 3.1 70B)
         self.remote_price_per_1m_tokens = float(os.getenv("REMOTE_PRICE_PER_1M_TOKENS", "0.90"))
+
+    def estimate_tokens(self, text: str) -> int:
+        """
+        Estimate the token count for a given text using tiktoken.
+        Falls back to a character-based heuristic if tiktoken fails.
+        """
+        try:
+            # Use cl100k_base encoding which is the default for most modern models
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            # Fallback: ~4 characters per token (common heuristic)
+            return len(text) // 4 + 1
 
     def call_local(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 1000, json_mode: bool = False) -> str:
         """

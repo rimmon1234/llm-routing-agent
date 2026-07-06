@@ -100,12 +100,19 @@ def print_metrics(result: dict):
     print(f"Cached:             {result.get('cached', False)}")
     print(f"Latency:            {result.get('latency_sec', 0.0):.3f}s")
     
+    local_tokens = result['prompt_tokens_local'] + result['completion_tokens_local']
     remote_tokens = result['prompt_tokens_remote'] + result['completion_tokens_remote']
-    print(f"Remote Tokens Used: {remote_tokens} (Prompt: {result['prompt_tokens_remote']}, Completion: {result['completion_tokens_remote']})")
+    total_tokens = local_tokens + remote_tokens
+    
+    print(f"Local Tokens:       {local_tokens} (Prompt: {result['prompt_tokens_local']}, Completion: {result['completion_tokens_local']})")
+    print(f"Remote Tokens:      {remote_tokens} (Prompt: {result['prompt_tokens_remote']}, Completion: {result['completion_tokens_remote']})")
+    print(f"Total Tokens:       {total_tokens}")
     print(f"Remote Cost:        ${result.get('cost_dollars', 0.0):.6f}")
     
     saving = result['cost_saved'] * 100
     print(f"Token Cost Saved:   {saving:.1f}%")
+    if result.get('estimated_savings_dollars', 0.0) > 0:
+        print(f"Estimated Savings:  ${result['estimated_savings_dollars']:.6f} (vs. routing all tokens to remote)")
     print("-" * 50)
     print("RESPONSE:")
     print("-" * 50)

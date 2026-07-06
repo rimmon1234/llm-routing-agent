@@ -80,6 +80,10 @@ class HybridRouter:
             if cached_result:
                 # Return copy with cached flag set to True
                 result = cached_result.copy()
+                # Backfill any fields that may be missing from older cache entries
+                result.setdefault("prompt_tokens_local", 0)
+                result.setdefault("completion_tokens_local", 0)
+                result.setdefault("estimated_savings_dollars", 0.0)
                 result["cached"] = True
                 result["latency_sec"] = time.perf_counter() - start_time
                 return result
@@ -91,6 +95,8 @@ class HybridRouter:
             "response": None,
             "local_attempts": 0,
             "remote_attempts": 0,
+            "prompt_tokens_local": 0,
+            "completion_tokens_local": 0,
             "prompt_tokens_remote": 0,
             "completion_tokens_remote": 0,
             "fallback_triggered": False,
@@ -107,6 +113,8 @@ class HybridRouter:
             result["route_chosen"] = "local"
             result["local_attempts"] = 1
             result["response"] = self.client.call_local(query, json_mode=use_json_mode)
+            result["prompt_tokens_local"] = self.client.estimate_tokens(query)
+            result["completion_tokens_local"] = self.client.estimate_tokens(result["response"])
             result["cost_saved"] = 1.0
             
         elif strategy == "always_remote":
@@ -124,6 +132,8 @@ class HybridRouter:
             # Step 1: Run local model
             result["local_attempts"] += 1
             local_res = self.client.call_local(query, json_mode=use_json_mode)
+            result["prompt_tokens_local"] += self.client.estimate_tokens(query)
+            result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
             
             # Step 2: Validate local response
             is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
@@ -148,12 +158,17 @@ class HybridRouter:
                         f"Corrected Response (Must be in {response_format} format{schema_info}):"
                     )
                     
+                    # Token count for repair input (system prompt + repair prompt)
+                    repair_input = (system_prompt or "") + "\n" + repair_prompt
+                    result["prompt_tokens_local"] += self.client.estimate_tokens(repair_input)
+                    
                     local_res = self.client.call_local(
                         prompt=repair_prompt,
                         system_prompt=system_prompt,
                         temperature=0.1,  # Lower temp to increase deterministic correctness
                         json_mode=use_json_mode
                     )
+                    result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
                     
                     # Evaluate again
                     is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
@@ -166,7 +181,11 @@ class HybridRouter:
             if is_valid:
                 result["route_chosen"] = "local"
                 result["response"] = local_res
-                result["cost_saved"] = 1.0
+                # Calculate cost_saved as the proportion of total tokens handled locally
+                total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                total_remote = result["prompt_tokens_remote"] + result["completion_tokens_remote"]
+                total = total_local + total_remote
+                result["cost_saved"] = total_local / total if total > 0 else 0.0
             else:
                 # Step 3: Local failed all attempts, fallback to remote
                 print("   [Router] Local repair failed or unavailable. Falling back to remote...")
@@ -177,9 +196,12 @@ class HybridRouter:
                 result["response"] = res
                 result["prompt_tokens_remote"] = pt
                 result["completion_tokens_remote"] = ct
-                result["cost_saved"] = 0.0
                 total_tokens = pt + ct
                 result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+                # cost_saved = proportion of total tokens that were local (even if we fell back)
+                total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                total_all = total_local + pt + ct
+                result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
 
         elif strategy == "predictive":
             # Step 1: Predict complexity upfront
@@ -200,6 +222,8 @@ class HybridRouter:
                 # Run local first
                 result["local_attempts"] += 1
                 local_res = self.client.call_local(query, json_mode=use_json_mode)
+                result["prompt_tokens_local"] += self.client.estimate_tokens(query)
+                result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
                 is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
                 
                 # Local Self-Correction (Retry Loop)
@@ -221,12 +245,17 @@ class HybridRouter:
                             f"Corrected Response (Must be in {response_format} format{schema_info}):"
                         )
                         
+                        # Token count for repair input (system prompt + repair prompt)
+                        repair_input = (system_prompt or "") + "\n" + repair_prompt
+                        result["prompt_tokens_local"] += self.client.estimate_tokens(repair_input)
+                        
                         local_res = self.client.call_local(
                             prompt=repair_prompt,
                             system_prompt=system_prompt,
                             temperature=0.1,
                             json_mode=use_json_mode
                         )
+                        result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
                         is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
                         if is_valid:
                             print(f"   [Router] Local repair successful on attempt {attempt}!")
@@ -237,7 +266,11 @@ class HybridRouter:
                 if is_valid:
                     result["route_chosen"] = "local"
                     result["response"] = local_res
-                    result["cost_saved"] = 1.0
+                    # Calculate cost_saved as the proportion of total tokens handled locally
+                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                    total_remote = result["prompt_tokens_remote"] + result["completion_tokens_remote"]
+                    total = total_local + total_remote
+                    result["cost_saved"] = total_local / total if total > 0 else 0.0
                 else:
                     result["fallback_triggered"] = True
                     result["route_chosen"] = "remote_fallback"
@@ -246,12 +279,19 @@ class HybridRouter:
                     result["response"] = res
                     result["prompt_tokens_remote"] = pt
                     result["completion_tokens_remote"] = ct
-                    result["cost_saved"] = 0.0
                     total_tokens = pt + ct
                     result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+                    # cost_saved = proportion of total tokens that were local (even if we fell back)
+                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                    total_all = total_local + pt + ct
+                    result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
 
         # Record total latency
         result["latency_sec"] = time.perf_counter() - start_time
+
+        # Calculate estimated dollar savings from local token processing
+        total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+        result["estimated_savings_dollars"] = (total_local / 1_000_000.0) * self.client.remote_price_per_1m_tokens
 
         # Save to cache if no errors and caching is allowed
         if not no_cache and result["response"] and "error executing" not in result["response"].lower():
