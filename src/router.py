@@ -5,6 +5,9 @@ from .client import LLMClient
 from .evaluator import ResponseEvaluator
 from .style import S
 
+# Compact repair prompt (no system prompt needed — the repair prompt is self-contained)
+_REPAIR_TMPL = "Q:{q}\nA:{r}\nERR:{e}\nFix ({fmt}{schema}):"
+
 class RouterCache:
     def __init__(self, cache_file: str = ".router_cache.json"):
         self.cache_file = cache_file
@@ -58,10 +61,69 @@ class HybridRouter:
         self.evaluator = evaluator or ResponseEvaluator(self.client)
         self.cache = RouterCache(cache_file)
 
+    def _run_local_with_retry(self, query: str, response_format: str, schema: any,
+                               use_json_mode: bool, max_retries: int, result: dict) -> tuple:
+        """Run local model with retry loop. Updates result in place. Returns (response, is_valid, error_reason)."""
+        result["local_attempts"] += 1
+        local_res = self.client.call_local(query, json_mode=use_json_mode)
+        result["prompt_tokens_local"] += self.client.estimate_tokens(query)
+        result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
+
+        is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
+
+        if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
+            print(f"   [Router] Repairing ({error_reason})...")
+            schema_hint = f"|{schema}" if schema else ""
+            for attempt in range(1, max_retries + 1):
+                time.sleep(0.5)
+                result["local_attempts"] += 1
+
+                repair_prompt = _REPAIR_TMPL.format(
+                    q=query, r=local_res, e=error_reason,
+                    fmt=response_format, schema=schema_hint
+                )
+                result["prompt_tokens_local"] += self.client.estimate_tokens(repair_prompt)
+
+                local_res = self.client.call_local(
+                    prompt=repair_prompt,
+                    temperature=0.1,
+                    json_mode=use_json_mode
+                )
+                result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
+
+                is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
+                if is_valid:
+                    print(f"   {S.good('[Router]')} Repaired attempt {S.good(str(attempt))}!")
+                    break
+                else:
+                    print(f"   {S.warn('[Router]')} Attempt {attempt} failed ({S.warn(error_reason)}).")
+
+        return local_res, is_valid, error_reason
+
+    def _handle_remote_call(self, query: str, result: dict):
+        """Call remote API, update result in place. Returns the response."""
+        result["remote_attempts"] += 1
+        res, pt, ct = self.client.call_remote(query)
+        result["prompt_tokens_remote"] = pt
+        result["completion_tokens_remote"] = ct
+        result["response"] = res
+        if pt == 0 and ct == 0 and self._is_error(res):
+            return res  # caller checks _is_error
+        total_tokens = pt + ct
+        result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+        return res
+
+    def _compute_cost_saved(self, result: dict) -> float:
+        """Proportion of total tokens handled locally."""
+        local_tok = result["prompt_tokens_local"] + result["completion_tokens_local"]
+        remote_tok = result["prompt_tokens_remote"] + result["completion_tokens_remote"]
+        total = local_tok + remote_tok
+        return local_tok / total if total > 0 else 0.0
+
     def route_and_execute(self, query: str, strategy: str = "fallback", response_format: str = "text", schema: any = None, max_retries: int = 2, no_cache: bool = False) -> dict:
         """
         Routes the query based on the strategy and returns execution logs and output.
-        
+
         Strategies:
             'always_local': Direct execution via Ollama (No validation)
             'always_remote': Direct execution via Fireworks AI
@@ -79,12 +141,9 @@ class HybridRouter:
         if not no_cache:
             cached_result = self.cache.get(query, strategy, response_format, schema_str)
             if cached_result:
-                # Return copy with cached flag set to True
                 result = cached_result.copy()
-                # Backfill any fields that may be missing from older cache entries
                 result.setdefault("prompt_tokens_local", 0)
                 result.setdefault("completion_tokens_local", 0)
-                result.setdefault("estimated_savings_dollars", 0.0)
                 result["cached"] = True
                 result["latency_sec"] = time.perf_counter() - start_time
                 return result
@@ -107,7 +166,6 @@ class HybridRouter:
             "cached": False
         }
 
-        # Check if local model expects strict JSON mode
         use_json_mode = (response_format.lower() == "json")
 
         if strategy == "always_local":
@@ -117,201 +175,67 @@ class HybridRouter:
             result["prompt_tokens_local"] = self.client.estimate_tokens(query)
             result["completion_tokens_local"] = self.client.estimate_tokens(result["response"])
             result["cost_saved"] = 1.0
-            
+
         elif strategy == "always_remote":
             result["route_chosen"] = "remote"
-            result["remote_attempts"] = 1
-            res, pt, ct = self.client.call_remote(query)
-            result["response"] = res
-            result["prompt_tokens_remote"] = pt
-            result["completion_tokens_remote"] = ct
+            self._handle_remote_call(query, result)
             result["cost_saved"] = 0.0
-            total_tokens = pt + ct
-            result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-            if total_tokens == 0 and self._is_error(res):
+            if result["prompt_tokens_remote"] == 0 and result["completion_tokens_remote"] == 0 and self._is_error(result["response"]):
                 result["route_chosen"] = "remote_failed"
-            
-        elif strategy == "fallback":
-            # Step 1: Run local model
-            result["local_attempts"] += 1
-            local_res = self.client.call_local(query, json_mode=use_json_mode)
-            result["prompt_tokens_local"] += self.client.estimate_tokens(query)
-            result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
-            
-            # Step 2: Validate local response
-            is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
-            
-            # Local Self-Correction (Retry Loop)
-            if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
-                print(f"   [Router] Local validation failed ({error_reason}). Initiating local repair loop...")
-                for attempt in range(1, max_retries + 1):
-                    time.sleep(0.5)  # Cooldown delay to prevent system overload
-                    result["local_attempts"] += 1
-                    
-                    # Construct repair instructions
-                    system_prompt = (
-                        "You are a helpful assistant. Correct the previous response based on the validation error. "
-                        "Do not explain the error; just output the corrected, compliant response."
-                    )
-                    schema_info = f" conforming to schema/requirements: {schema}" if schema else ""
-                    repair_prompt = (
-                        f"Original Query: {query}\n\n"
-                        f"Previous Response: {local_res}\n\n"
-                        f"Validation Error: {error_reason}\n\n"
-                        f"Corrected Response (Must be in {response_format} format{schema_info}):"
-                    )
-                    
-                    # Token count for repair input (system prompt + repair prompt)
-                    repair_input = (system_prompt or "") + "\n" + repair_prompt
-                    result["prompt_tokens_local"] += self.client.estimate_tokens(repair_input)
-                    
-                    local_res = self.client.call_local(
-                        prompt=repair_prompt,
-                        system_prompt=system_prompt,
-                        temperature=0.1,  # Lower temp to increase deterministic correctness
-                        json_mode=use_json_mode
-                    )
-                    result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
-                    
-                    # Evaluate again
-                    is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
-                    if is_valid:
-                        print(f"   {S.good('[Router]')} Local repair successful on attempt {S.good(str(attempt))}!")
-                        break
-                    else:
-                        print(f"   {S.warn('[Router]')} Local repair attempt {attempt} failed ({S.warn(error_reason)}).")
 
+        elif strategy == "fallback":
+            local_res, is_valid, error_reason = self._run_local_with_retry(
+                query, response_format, schema, use_json_mode, max_retries, result
+            )
             if is_valid:
                 result["route_chosen"] = "local"
                 result["response"] = local_res
-                # Calculate cost_saved as the proportion of total tokens handled locally
-                total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                total_remote = result["prompt_tokens_remote"] + result["completion_tokens_remote"]
-                total = total_local + total_remote
-                result["cost_saved"] = total_local / total if total > 0 else 0.0
+                result["cost_saved"] = self._compute_cost_saved(result)
             else:
-                # Step 3: Local failed all attempts, fallback to remote
-                print(f"   {S.warn('[Router]')} Local repair failed. {S.warn('Falling back to remote...')}")
+                print(f"   {S.warn('[Router]')} Falling back...")
                 result["fallback_triggered"] = True
-                result["route_chosen"] = "remote_fallback"
-                result["remote_attempts"] += 1
-                res, pt, ct = self.client.call_remote(query)
-                result["prompt_tokens_remote"] = pt
-                result["completion_tokens_remote"] = ct
-                if pt == 0 and ct == 0 and self._is_error(res):
-                    # Remote call failed (e.g. no credits) — use best local response
-                    print(f"   {S.error('[Router]')} Remote call failed (API error). {S.warn('Using best local response.')}")
+                self._handle_remote_call(query, result)
+                if result["prompt_tokens_remote"] == 0 and result["completion_tokens_remote"] == 0 and self._is_error(result["response"]):
+                    print(f"   {S.error('[Router]')} Remote failed. Using local best-effort.")
                     result["route_chosen"] = "local_best_effort"
                     result["response"] = local_res
                     result["cost_saved"] = 1.0
                 else:
-                    result["response"] = res
-                    total_tokens = pt + ct
-                    result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                    total_all = total_local + pt + ct
-                    result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
+                    result["route_chosen"] = "remote_fallback"
+                    result["cost_saved"] = self._compute_cost_saved(result)
 
         elif strategy == "predictive":
-            # Step 1: Predict complexity upfront
             is_complex = self._predict_complexity(query, response_format)
-            
-            if is_complex:
-                # Route directly to remote
-                result["route_chosen"] = "remote"
-                result["remote_attempts"] += 1
-                res, pt, ct = self.client.call_remote(query)
-                result["response"] = res
-                result["prompt_tokens_remote"] = pt
-                result["completion_tokens_remote"] = ct
-                result["cost_saved"] = 0.0
-                total_tokens = pt + ct
-                result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-            else:
-                # Run local first
-                result["local_attempts"] += 1
-                local_res = self.client.call_local(query, json_mode=use_json_mode)
-                result["prompt_tokens_local"] += self.client.estimate_tokens(query)
-                result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
-                is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
-                
-                # Local Self-Correction (Retry Loop)
-                if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
-                    print(f"   [Router] Local validation failed ({error_reason}). Initiating local repair loop...")
-                    for attempt in range(1, max_retries + 1):
-                        time.sleep(0.5)  # Cooldown delay to prevent system overload
-                        result["local_attempts"] += 1
-                        
-                        system_prompt = (
-                            "You are a helpful assistant. Correct the previous response based on the validation error. "
-                            "Do not explain the error; just output the corrected, compliant response."
-                        )
-                        schema_info = f" conforming to schema/requirements: {schema}" if schema else ""
-                        repair_prompt = (
-                            f"Original Query: {query}\n\n"
-                            f"Previous Response: {local_res}\n\n"
-                            f"Validation Error: {error_reason}\n\n"
-                            f"Corrected Response (Must be in {response_format} format{schema_info}):"
-                        )
-                        
-                        # Token count for repair input (system prompt + repair prompt)
-                        repair_input = (system_prompt or "") + "\n" + repair_prompt
-                        result["prompt_tokens_local"] += self.client.estimate_tokens(repair_input)
-                        
-                        local_res = self.client.call_local(
-                            prompt=repair_prompt,
-                            system_prompt=system_prompt,
-                            temperature=0.1,
-                            json_mode=use_json_mode
-                        )
-                        result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
-                        is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
-                        if is_valid:
-                            print(f"   [Router] Local repair successful on attempt {attempt}!")
-                            break
-                        else:
-                            print(f"   {S.warn('[Router]')} Local repair attempt {attempt} failed ({S.warn(error_reason)}).")
 
+            if is_complex:
+                result["route_chosen"] = "remote"
+                self._handle_remote_call(query, result)
+                result["cost_saved"] = 0.0
+            else:
+                local_res, is_valid, error_reason = self._run_local_with_retry(
+                    query, response_format, schema, use_json_mode, max_retries, result
+                )
                 if is_valid:
                     result["route_chosen"] = "local"
                     result["response"] = local_res
-                    # Calculate cost_saved as the proportion of total tokens handled locally
-                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                    total_remote = result["prompt_tokens_remote"] + result["completion_tokens_remote"]
-                    total = total_local + total_remote
-                    result["cost_saved"] = total_local / total if total > 0 else 0.0
+                    result["cost_saved"] = self._compute_cost_saved(result)
                 else:
                     result["fallback_triggered"] = True
-                    result["route_chosen"] = "remote_fallback"
-                    result["remote_attempts"] += 1
-                    res, pt, ct = self.client.call_remote(query)
-                    result["prompt_tokens_remote"] = pt
-                    result["completion_tokens_remote"] = ct
-                    if pt == 0 and ct == 0 and self._is_error(res):
-                        # Remote call failed — use best local response
-                        print(f"   {S.error('[Router]')} Remote call failed (API error). {S.warn('Using best local response.')}")
+                    self._handle_remote_call(query, result)
+                    if result["prompt_tokens_remote"] == 0 and result["completion_tokens_remote"] == 0 and self._is_error(result["response"]):
+                        print(f"   {S.error('[Router]')} Remote failed. Using local best-effort.")
                         result["route_chosen"] = "local_best_effort"
                         result["response"] = local_res
                         result["cost_saved"] = 1.0
                     else:
-                        result["response"] = res
-                        total_tokens = pt + ct
-                        result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-                        total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                        total_all = total_local + pt + ct
-                        result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
+                        result["route_chosen"] = "remote_fallback"
+                        result["cost_saved"] = self._compute_cost_saved(result)
 
-        # Record total latency
         result["latency_sec"] = time.perf_counter() - start_time
-
-        # Calculate estimated dollar savings from local token processing
-        total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-        result["estimated_savings_dollars"] = (total_local / 1_000_000.0) * self.client.remote_price_per_1m_tokens
 
         # Save to cache if no errors and caching is allowed
         if not no_cache and result["response"]:
-            is_error = result["response"].lower().startswith("error executing")
-            if not is_error:
+            if not result["response"].lower().startswith("error executing"):
                 self.cache.set(query, strategy, response_format, schema_str, result)
 
         return result

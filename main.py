@@ -171,10 +171,12 @@ def print_metrics(result: dict):
     cost = r.get('cost_dollars', 0.0)
     print(f"{p}{S.label('Remote cost')}       {S.money(f'${cost:.8f}')}")
 
+    local_tok = r['prompt_tokens_local'] + r['completion_tokens_local']
     saving = r['cost_saved'] * 100
     if saving > 0:
         print(f"{p}{S.label('Token cost saved')}  {S.good(f'{saving:.1f}%')}")
-        est = r.get('estimated_savings_dollars', 0.0)
+        remote_price = float(os.getenv("REMOTE_PRICE_PER_1M_TOKENS", "0.90"))
+        est = (local_tok / 1_000_000.0) * remote_price
         print(f"{p}{S.label('Estimated savings')} {S.money(f'${est:.8f}')} {S.muted('(vs. routing all tokens to remote)')}")
     else:
         print(f"{p}{S.label('Token cost saved')}  {S.value('0.0%')}")
