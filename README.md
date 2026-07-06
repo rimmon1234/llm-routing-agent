@@ -249,39 +249,144 @@ RESPONSE:
 
 ## AMD ROCm Integration
 
-This project is designed to run on **AMD Instinct GPUs** via the AMD Developer Cloud.
+This project is designed to run on **AMD Instinct GPUs** via the AMD Developer Cloud. At startup, the agent automatically detects AMD GPU availability and reports the hardware in use.
+
+### One-Click Setup Script
+
+For AMD Developer Cloud instances, use the automated setup script:
+
+```bash
+chmod +x scripts/setup-amd-cloud.sh
+./scripts/setup-amd-cloud.sh
+```
+
+This script handles everything: GPU detection, ROCm configuration, Ollama setup, model pulling, Python venv, environment config, and a smoke test — all in one command.
+
+> 💡 Run `./scripts/setup-amd-cloud.sh --dry-run` to preview steps without executing.
+
+### Automatic GPU Detection
+
+When the agent starts, it detects the GPU environment and reports it in the startup banner:
+
+**On an AMD ROCm system:**
+```
+==================================================
+  Hybrid Token-Efficient Routing Agent CLI
+==================================================
+System:   AMD ROCm detected
+GPU:      AMD Instinct MI300X (64 GB VRAM)
+Backend:  ROCM
+Driver:   ROCm (HIP) 6.2.0
+Model:    llama3.2:3b (local) / accounts/fireworks/models/llama-v3p1-70b-instruct (remote)
+Strategy: fallback | Expected Format: text
+...
+```
+
+**On a non-AMD system (Mac, Intel, etc.):**
+```
+==================================================
+  Hybrid Token-Efficient Routing Agent CLI
+==================================================
+System:   AMD GPU not detected (running on CPU)
+Model:    llama3.2:3b (local) / accounts/fireworks/models/llama-v3p1-70b-instruct (remote)
+Strategy: fallback | Expected Format: text
+...
+```
+
+Detection uses multiple methods (in order):
+1. `rocminfo` — ROCm hardware inspection utility
+2. `torch.cuda.is_available()` + `torch.version.hip` — PyTorch HIP detection
+3. `ollama ps` — GPU process check
+
+All methods are wrapped in try/except — **zero impact on non-AMD systems**.
+
+### Manual Setup on AMD Developer Cloud
+
+```bash
+# 1. Launch an AMD Developer Cloud instance with GPU
+# 2. Verify GPU detection
+rocminfo | grep -i "Marketing Name:"
+
+# 3. Install ROCm-compatible Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 4. (MI300X only) Configure Ollama for gfx942
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/null << 'EOF'
+[Service]
+Environment="HSA_OVERRIDE_GFX_VERSION=9.4.2"
+Environment="OLLAMA_HOST=0.0.0.0"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+
+# 5. Pull a model and start
+ollama pull llama3.2:3b
+ollama serve &
+
+# 6. Clone and run the agent
+git clone https://github.com/yourusername/llm-routing-agent.git
+cd llm-routing-agent
+pip install -r requirements.txt
+python main.py --query "Your query"
+```
 
 ### ROCm-Optimized Ollama
 
 Ollama natively supports AMD ROCm, including:
 
-- **AMD Instinct MI300X** (available in AMD Developer Cloud)
-- **AMD Radeon RX 7000 series** (local development)
-- ROCm 5.7+ with HIP SDK
-
-### Running on AMD Developer Cloud
-
-```bash
-# 1. Launch an AMD Developer Cloud instance with GPU
-# 2. Install ROCm-compatible Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 3. Verify GPU detection
-rocminfo
-
-# 4. Pull and run models
-ollama pull llama3.2:3b
-ollama serve &
-
-# 5. Run the agent
-python main.py --query "Your query" --strategy fallback
-```
+| AMD GPU | Architecture | Status |
+|---|---|---|
+| **Instinct MI300X** | gfx942 | ✅ Recommended for hackathon |
+| **Instinct MI250** | gfx90a | ✅ Supported |
+| **Radeon RX 7900 XTX** | gfx1100 | ✅ Local dev |
+| **Radeon PRO W7900** | gfx1100 | ✅ Local dev |
 
 ### Performance Tips for AMD GPUs
 
 - **Small models** (1B–3B): Ideal for high-throughput, low-latency routing on AMD GPUs
 - **Larger models** (7B+): Use the `predictive` strategy to avoid local bottlenecks
 - Self-critique is **auto-disabled** for 1B/3B models to prevent resource-heavy hallucinations
+- For MI300X: set `HSA_OVERRIDE_GFX_VERSION=9.4.2` in Ollama config (handled by setup script)
+
+---
+
+## AMD Developer Cloud Quick-Start
+
+### Launch an Instance
+
+1. Go to [AMD Developer Cloud](https://developer.amd.com/)
+2. Launch an instance with **AMD Instinct MI300X** GPU
+3. SSH in using the provided credentials
+
+### Run the One-Click Setup
+
+```bash
+git clone https://github.com/yourusername/llm-routing-agent.git
+cd llm-routing-agent
+./scripts/setup-amd-cloud.sh
+```
+
+Watch the output — you'll see GPU detection, Ollama installation, model pulling, and a smoke test all happen automatically.
+
+### Benchmarking on AMD Hardware
+
+Run the test suite for a quick benchmark:
+
+```bash
+python test_router.py
+```
+
+Then run strategy comparisons:
+
+```bash
+python main.py --query "Write a function for merge sort" --strategy always_local --format python
+python main.py --query "Write a function for merge sort" --strategy fallback --format python
+python main.py --query "Write a function for merge sort" --strategy predictive --format python
+python main.py --query "Write a function for merge sort" --strategy always_remote --format python
+```
+
+Add your benchmark results to the [AMD GPU Benchmark Table](#benchmarking) and include them in your pitch deck.
 
 ---
 
@@ -291,9 +396,11 @@ python main.py --query "Your query" --strategy fallback
 llm-routing-agent/
 ├── main.py                 # CLI entry point + REPL + metrics display
 ├── src/
-│   ├── client.py           # LLMClient (Ollama local + Fireworks remote)
+│   ├── client.py           # LLMClient (Ollama local + Fireworks remote + GPU detection)
 │   ├── router.py           # HybridRouter (routing logic) + RouterCache
 │   └── evaluator.py        # ResponseEvaluator (quality validation)
+├── scripts/
+│   └── setup-amd-cloud.sh  # One-click AMD Developer Cloud setup
 ├── test_router.py          # Manual integration test suite
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment variable template

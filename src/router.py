@@ -3,6 +3,7 @@ import json
 import time
 from .client import LLMClient
 from .evaluator import ResponseEvaluator
+from .style import S
 
 class RouterCache:
     def __init__(self, cache_file: str = ".router_cache.json"):
@@ -15,7 +16,7 @@ class RouterCache:
                 with open(self.cache_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception as e:
-                print(f"   [Cache] Warning: Failed to load cache file: {e}")
+                print(f"   {S.warn('[Cache]')} Warning: Failed to load cache file: {e}")
         return {}
 
     def _save_cache(self):
@@ -23,7 +24,7 @@ class RouterCache:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"   [Cache] Warning: Failed to write cache file: {e}")
+            print(f"   {S.warn('[Cache]')} Warning: Failed to write cache file: {e}")
 
     def _normalize_query(self, query: str) -> str:
         import re
@@ -127,6 +128,8 @@ class HybridRouter:
             result["cost_saved"] = 0.0
             total_tokens = pt + ct
             result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+            if total_tokens == 0 and self._is_error(res):
+                result["route_chosen"] = "remote_failed"
             
         elif strategy == "fallback":
             # Step 1: Run local model
@@ -173,10 +176,10 @@ class HybridRouter:
                     # Evaluate again
                     is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
                     if is_valid:
-                        print(f"   [Router] Local repair successful on attempt {attempt}!")
+                        print(f"   {S.good('[Router]')} Local repair successful on attempt {S.good(str(attempt))}!")
                         break
                     else:
-                        print(f"   [Router] Local repair attempt {attempt} failed ({error_reason}).")
+                        print(f"   {S.warn('[Router]')} Local repair attempt {attempt} failed ({S.warn(error_reason)}).")
 
             if is_valid:
                 result["route_chosen"] = "local"
@@ -188,20 +191,26 @@ class HybridRouter:
                 result["cost_saved"] = total_local / total if total > 0 else 0.0
             else:
                 # Step 3: Local failed all attempts, fallback to remote
-                print("   [Router] Local repair failed or unavailable. Falling back to remote...")
+                print(f"   {S.warn('[Router]')} Local repair failed. {S.warn('Falling back to remote...')}")
                 result["fallback_triggered"] = True
                 result["route_chosen"] = "remote_fallback"
                 result["remote_attempts"] += 1
                 res, pt, ct = self.client.call_remote(query)
-                result["response"] = res
                 result["prompt_tokens_remote"] = pt
                 result["completion_tokens_remote"] = ct
-                total_tokens = pt + ct
-                result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-                # cost_saved = proportion of total tokens that were local (even if we fell back)
-                total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                total_all = total_local + pt + ct
-                result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
+                if pt == 0 and ct == 0 and self._is_error(res):
+                    # Remote call failed (e.g. no credits) — use best local response
+                    print(f"   {S.error('[Router]')} Remote call failed (API error). {S.warn('Using best local response.')}")
+                    result["route_chosen"] = "local_best_effort"
+                    result["response"] = local_res
+                    result["cost_saved"] = 1.0
+                else:
+                    result["response"] = res
+                    total_tokens = pt + ct
+                    result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                    total_all = total_local + pt + ct
+                    result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
 
         elif strategy == "predictive":
             # Step 1: Predict complexity upfront
@@ -261,7 +270,7 @@ class HybridRouter:
                             print(f"   [Router] Local repair successful on attempt {attempt}!")
                             break
                         else:
-                            print(f"   [Router] Local repair attempt {attempt} failed ({error_reason}).")
+                            print(f"   {S.warn('[Router]')} Local repair attempt {attempt} failed ({S.warn(error_reason)}).")
 
                 if is_valid:
                     result["route_chosen"] = "local"
@@ -276,15 +285,21 @@ class HybridRouter:
                     result["route_chosen"] = "remote_fallback"
                     result["remote_attempts"] += 1
                     res, pt, ct = self.client.call_remote(query)
-                    result["response"] = res
                     result["prompt_tokens_remote"] = pt
                     result["completion_tokens_remote"] = ct
-                    total_tokens = pt + ct
-                    result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
-                    # cost_saved = proportion of total tokens that were local (even if we fell back)
-                    total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
-                    total_all = total_local + pt + ct
-                    result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
+                    if pt == 0 and ct == 0 and self._is_error(res):
+                        # Remote call failed — use best local response
+                        print(f"   {S.error('[Router]')} Remote call failed (API error). {S.warn('Using best local response.')}")
+                        result["route_chosen"] = "local_best_effort"
+                        result["response"] = local_res
+                        result["cost_saved"] = 1.0
+                    else:
+                        result["response"] = res
+                        total_tokens = pt + ct
+                        result["cost_dollars"] = (total_tokens / 1_000_000.0) * self.client.remote_price_per_1m_tokens
+                        total_local = result["prompt_tokens_local"] + result["completion_tokens_local"]
+                        total_all = total_local + pt + ct
+                        result["cost_saved"] = total_local / total_all if total_all > 0 else 0.0
 
         # Record total latency
         result["latency_sec"] = time.perf_counter() - start_time
@@ -294,10 +309,18 @@ class HybridRouter:
         result["estimated_savings_dollars"] = (total_local / 1_000_000.0) * self.client.remote_price_per_1m_tokens
 
         # Save to cache if no errors and caching is allowed
-        if not no_cache and result["response"] and "error executing" not in result["response"].lower():
-            self.cache.set(query, strategy, response_format, schema_str, result)
+        if not no_cache and result["response"]:
+            is_error = result["response"].lower().startswith("error executing")
+            if not is_error:
+                self.cache.set(query, strategy, response_format, schema_str, result)
 
         return result
+
+    def _is_error(self, response: str) -> bool:
+        """Check if a response string is an error message from the LLM client."""
+        if not response:
+            return True
+        return response.lower().startswith("error executing")
 
     def _predict_complexity(self, query: str, response_format: str = "text") -> bool:
         """
