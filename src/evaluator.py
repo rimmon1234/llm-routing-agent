@@ -192,48 +192,29 @@ class ResponseEvaluator:
         return cleaned
 
     def _self_critique(self, query: str, response: str) -> tuple[bool, str]:
-        """
-        Instructs the local model to critique its own response using Chain-of-Thought (CoT).
-        """
-        system_prompt = (
-            "You are an objective AI evaluator. Your job is to grade the answer provided for a user query.\n"
-            "Examine if the answer is accurate, coherent, and fully answers the question.\n"
-            "You must respond in the following format:\n"
-            "THOUGHTS: <one or two sentences evaluating the response>\n"
-            "VERDICT: <either YES or NO>"
-        )
-        prompt = (
-            f"User Query: {query}\n\n"
-            f"Provided Answer: {response}\n\n"
-            "Perform your evaluation. Format your response exactly as:\n"
-            "THOUGHTS: [critique analysis]\n"
-            "VERDICT: [YES or NO]"
-        )
+        """Critique via local model. Uses compact prompt to minimize token use."""
+        sys = "Grade: accurate? clear? complete?\nTHOUGHTS:\nVERDICT: YES|NO"
+        prompt = f"Q: {query}\nA: {response}\n\nTHOUGHTS:\nVERDICT:"
 
         try:
             eval_result = self.client.call_local(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=0.0,
-                max_tokens=100
+                prompt=prompt, system_prompt=sys,
+                temperature=0.0, max_tokens=80
             )
-            # Find the VERDICT line
             verdict = "NO"
             thoughts = ""
             for line in eval_result.split('\n'):
-                line_upper = line.strip().upper()
-                if line_upper.startswith("VERDICT:"):
-                    verdict = line_upper.replace("VERDICT:", "").strip()
-                elif line_upper.startswith("THOUGHTS:"):
-                    thoughts = line.strip()[9:].strip()
+                lu = line.strip().upper()
+                if lu.startswith("VERDICT:"):
+                    verdict = lu.replace("VERDICT:", "").strip()
+                elif lu.startswith("THOUGHTS:"):
+                    thoughts = line[9:].strip()
 
             if "YES" in verdict:
                 return True, ""
-            
-            reason = "Model self-critique returned 'NO'."
+            reason = "Self-critique: NO"
             if thoughts:
-                reason += f" Reason: {thoughts}"
+                reason += f" ({thoughts})"
             return False, reason
-        except Exception as e:
-            # Fallback to True if eval fails to prevent false negatives
+        except Exception:
             return True, ""
