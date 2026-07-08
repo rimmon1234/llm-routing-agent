@@ -30,3 +30,8 @@ htmlcov/
 # Operating System files
 .DS_Store
 Thumbs.db
+
+# Hackathon evaluation test folders
+input/
+output/
+

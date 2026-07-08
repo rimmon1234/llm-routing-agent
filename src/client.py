@@ -32,15 +32,27 @@ class LLMClient:
 
         # Remote client configuration (Fireworks AI)
         fireworks_api_key = os.getenv("FIREWORKS_API_KEY")
+        fireworks_base_url = os.getenv("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1")
         self.remote_client = None
         if fireworks_api_key:
             self.remote_client = OpenAI(
-                base_url="https://api.fireworks.ai/inference/v1",
+                base_url=fireworks_base_url,
                 api_key=fireworks_api_key
             )
         else:
             print("Warning: FIREWORKS_API_KEY is not set. Remote routing calls will fail.")
-        self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
+        
+        # Read allowed models from environment (Track 1 requirement)
+        allowed_models_env = os.getenv("ALLOWED_MODELS")
+        if allowed_models_env:
+            allowed_models = [m.strip() for m in allowed_models_env.split(",") if m.strip()]
+            if allowed_models:
+                # Use the first permitted model as our primary remote model
+                self.remote_model = allowed_models[0]
+            else:
+                self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
+        else:
+            self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
         
         # Remote model pricing per 1M tokens (defaults to $0.90 per 1M tokens for Llama 3.1 70B)
         self.remote_price_per_1m_tokens = float(os.getenv("REMOTE_PRICE_PER_1M_TOKENS", "0.90"))
