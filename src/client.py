@@ -50,9 +50,9 @@ class LLMClient:
                 # Use the first permitted model as our primary remote model
                 self.remote_model = allowed_models[0]
             else:
-                self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
+                self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/deepseek-v4-pro")
         else:
-            self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/llama-v3p1-70b-instruct")
+            self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/deepseek-v4-pro")
         
         # Remote model pricing per 1M tokens (defaults to $0.90 per 1M tokens for Llama 3.1 70B)
         self.remote_price_per_1m_tokens = float(os.getenv("REMOTE_PRICE_PER_1M_TOKENS", "0.90"))
