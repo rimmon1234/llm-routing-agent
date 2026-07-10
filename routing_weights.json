@@ -1,0 +1,20 @@
+{
+  "risk_weights": {
+    "tech_depth": 3.0,
+    "reasoning_depth": 2.5,
+    "ambiguity": 2.0,
+    "constraint_density": 2.0,
+    "output_size": 1.5,
+    "math_reasoning": 2.0,
+    "evaluator_uncertainty": 2.5,
+    "distributed_systems": 1.5,
+    "json_formatting": 1.0
+  },
+  "risk_normalization": {
+    "tech_depth": 5.0,
+    "reasoning_depth": 5.0,
+    "constraint_density": 5.0,
+    "ambiguity": 3.0,
+    "math_reasoning": 3.0
+  }
+}

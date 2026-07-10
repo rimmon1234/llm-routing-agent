@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "metadata": {
+    "benchmark_version": "1.1",
+    "date": "2026-07-10T19:48:06.891883",
+    "prompt_count": 30,
+    "optimization_score": 0.4666666666666667,
+    "previous_thresholds": {
+      "ZONE_LOCAL_LIMIT": 0.3,
+      "ZONE_REMOTE_LIMIT": 0.55,
+      "RISK_THRESHOLD": 0.35
+    },
+    "calibrated_thresholds": {
+      "ZONE_LOCAL_LIMIT": 0.3,
+      "ZONE_REMOTE_LIMIT": 0.55,
+      "RISK_THRESHOLD": 0.35
+    },
+    "metrics_before_calibration": {
+      "oracle_routing_accuracy": 0.4666666666666667,
+      "overall_accuracy": 0.7666666666666667,
+      "total_cost": 0.0158697,
+      "total_latency": 166.8621636000462,
+      "local_success_rate": 1.0,
+      "local_routing_percentage": 43.333333333333336,
+      "remote_routing_percentage": 56.666666666666664
+    },
+    "metrics_after_calibration": {
+      "oracle_routing_accuracy": 0.4666666666666667,
+      "overall_accuracy": 0.7666666666666667,
+      "total_cost": 0.0158697,
+      "total_latency": 166.8621636000462,
+      "local_success_rate": 1.0,
+      "local_routing_percentage": 43.333333333333336,
+      "remote_routing_percentage": 56.666666666666664
+    }
+  },
+  "ZONE_LOCAL_LIMIT": 0.3,
+  "ZONE_REMOTE_LIMIT": 0.55,
+  "RISK_THRESHOLD": 0.35
+}

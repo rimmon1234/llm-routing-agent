@@ -11,6 +11,19 @@ from .style import S
 _REPAIR_TMPL = "Q:{q}\nA:{r}\nERR:{e}\nFix ({fmt}{schema}):"
 
 @dataclass
+class RoutingDiagnostics:
+    query: str
+    total_complexity_score: float
+    feature_scores: dict[str, float]
+    selected_route: str
+    threshold_used: float
+    explanation: str
+    feature_contributions_version: int = 1
+    feature_contributions: dict[str, float] = field(default_factory=dict)
+    risk_components: dict[str, float] = field(default_factory=dict)
+    risk_weights: dict[str, float] = field(default_factory=dict)
+
+@dataclass
 class ComplexityReport:
     score: float
     normalized_score: float
@@ -28,13 +41,28 @@ class ComplexityReport:
     matched_entities: list[str] = field(default_factory=list)
     comp_entities_count: int = 0
     comparison_count: int = 0
+    diagnostics: RoutingDiagnostics = None
+
+    def __iter__(self):
+        yield self
+        yield self.diagnostics
+
+    def __getitem__(self, index):
+        if index == 0:
+            return self
+        elif index == 1:
+            return self.diagnostics
+        raise IndexError("ComplexityReport has only 2 items when indexed as a tuple")
+
+    def __len__(self):
+        return 2
 
 @dataclass
 class RoutingFeatures:
     task_count: int
     constraint_count: int
     entities_count: int
-    tech_depth: int
+    tech_depth: float
     output_size: str
     ambiguity_count: int
     reasoning_depth: int
@@ -50,6 +78,120 @@ class PredictiveRouterConfig:
     ZONE_LOCAL_LIMIT = 0.30       # Definitely Local boundary
     ZONE_REMOTE_LIMIT = 0.55      # Definitely Remote boundary
     RISK_THRESHOLD = 0.35         # Risk tolerance boundary for Borderline zone
+
+    @classmethod
+    def load_calibrated_thresholds(cls):
+        import os
+        import json
+        path = "calibrated_thresholds.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                def get_threshold(key):
+                    # Check top-level
+                    val = data.get(key)
+                    if val is not None:
+                        return val
+                    # Check under metadata.calibrated_thresholds
+                    metadata = data.get("metadata")
+                    if isinstance(metadata, dict):
+                        calib = metadata.get("calibrated_thresholds")
+                        if isinstance(calib, dict) and calib.get(key) is not None:
+                            return calib.get(key)
+                    # Check under top-level calibrated_thresholds
+                    calib = data.get("calibrated_thresholds")
+                    if isinstance(calib, dict) and calib.get(key) is not None:
+                        return calib.get(key)
+                    return None
+
+                local_limit = get_threshold("ZONE_LOCAL_LIMIT")
+                if isinstance(local_limit, (int, float)) and 0.0 <= local_limit <= 1.0:
+                    cls.ZONE_LOCAL_LIMIT = float(local_limit)
+                    
+                remote_limit = get_threshold("ZONE_REMOTE_LIMIT")
+                if isinstance(remote_limit, (int, float)) and 0.0 <= remote_limit <= 1.0:
+                    cls.ZONE_REMOTE_LIMIT = float(remote_limit)
+                    
+                risk_threshold = get_threshold("RISK_THRESHOLD")
+                if isinstance(risk_threshold, (int, float)) and 0.0 <= risk_threshold <= 1.0:
+                    cls.RISK_THRESHOLD = float(risk_threshold)
+            except Exception:
+                # Fallback to default values on parse error
+                pass
+
+    RISK_COMPONENTS_WEIGHTS = {}
+    RISK_NORMALIZATION = {}
+    EVALUATOR_HISTORICAL_SUCCESS = {}
+
+    @classmethod
+    def load_routing_weights(cls):
+        import os
+        import json
+        
+        # Default fallback values
+        cls.RISK_COMPONENTS_WEIGHTS = {
+            "tech_depth": 3.0,
+            "reasoning_depth": 2.5,
+            "ambiguity": 2.0,
+            "constraint_density": 2.0,
+            "output_size": 1.5,
+            "math_reasoning": 2.0,
+            "evaluator_uncertainty": 2.5,
+            "distributed_systems": 1.5,
+            "json_formatting": 1.0
+        }
+        cls.RISK_NORMALIZATION = {
+            "tech_depth": 5.0,
+            "reasoning_depth": 5.0,
+            "constraint_density": 5.0,
+            "ambiguity": 3.0,
+            "math_reasoning": 3.0
+        }
+        cls.EVALUATOR_HISTORICAL_SUCCESS = {
+            "CodeGenerationEvaluator": 0.82,
+            "DebuggingEvaluator": 0.85,
+            "JSONEvaluator": 0.90,
+            "PythonEvaluator": 0.92,
+            "ComparisonEvaluator": 0.98,
+            "SummarizationEvaluator": 0.95,
+            "ArchitectureEvaluator": 0.88,
+            "GenericTextEvaluator": 0.95
+        }
+        
+        path = "routing_weights.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                # Update configurations if present
+                if "risk_weights" in data and isinstance(data["risk_weights"], dict):
+                    for subk, subv in data["risk_weights"].items():
+                        if isinstance(subv, (int, float)):
+                            cls.RISK_COMPONENTS_WEIGHTS[subk] = float(subv)
+                            
+                if "risk_normalization" in data and isinstance(data["risk_normalization"], dict):
+                    for subk, subv in data["risk_normalization"].items():
+                        if isinstance(subv, (int, float)):
+                            cls.RISK_NORMALIZATION[subk] = float(subv)
+            except Exception:
+                pass
+                
+        # Load from evaluation_stats.json if it exists
+        stats_path = "evaluation_stats.json"
+        if os.path.exists(stats_path):
+            try:
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    stats_data = json.load(f)
+                for name, entry in stats_data.items():
+                    if isinstance(entry, dict) and "success_rate" in entry:
+                        cls.EVALUATOR_HISTORICAL_SUCCESS[name] = float(entry["success_rate"])
+                    elif isinstance(entry, (int, float)):
+                        cls.EVALUATOR_HISTORICAL_SUCCESS[name] = float(entry)
+            except Exception:
+                pass
 
     # 2. COMPLEXITY FEATURE WEIGHTS
     COMPLEXITY_WEIGHTS = {
@@ -68,6 +210,25 @@ class PredictiveRouterConfig:
         "domain_breadth": 2.0
     }
 
+    KEYWORD_WEIGHTS = {
+        # Basic programming keywords (contribute 0.2 weight)
+        "python": 0.2, "java": 0.2, "c++": 0.2, "cpp": 0.2, "javascript": 0.2, "js": 0.2,
+        "typescript": 0.2, "ts": 0.2, "rust": 0.2, "go": 0.2, "golang": 0.2, "c": 0.2,
+        "string": 0.2, "function": 0.2, "method": 0.2, "class": 0.2, "code": 0.2,
+        "program": 0.2, "loop": 0.2, "array": 0.2, "list": 0.2, "variable": 0.2, "reverse": 0.2,
+        "check": 0.2, "sum": 0.2, "compare": 0.2, "count": 0.2, "palindrome": 0.2, "map": 0.2,
+        
+        # High-complexity programming concepts (contribute 2.0 weight)
+        "compiler": 2.0, "concurrency": 2.0, "optimization": 2.0, "distributed": 2.0,
+        "distributed systems": 2.0, "consensus": 2.0, "raft": 2.0, "paxos": 2.0, "compilation": 2.0, 
+        "ast": 2.0, "recursion": 1.5, "multithreading": 2.0, "garbage collection": 2.0, 
+        "memory leak": 2.0, "leak": 2.0, "deadlock": 2.0, "race condition": 2.0, 
+        "synchronization": 2.0, "parallelism": 2.0, "sharding": 2.0, "replication": 2.0, 
+        "consistency": 2.0, "mutex": 2.0, "virtual memory": 2.0, "memory management": 2.0,
+        "advanced algorithms": 2.0, "compiler design": 2.0, "parallel distributed optimization": 3.0,
+        "compiler optimization": 2.5
+    }
+
     # 3. RISK FEATURE WEIGHTS (Likelihood of local model failure)
     RISK_WEIGHTS = {
         "math_reasoning": 4.5,
@@ -81,7 +242,7 @@ class PredictiveRouterConfig:
 
     # 4. TECH DOMAINS & KEYWORDS
     DOMAIN_KEYWORDS = {
-        "Programming": {"python", "java", "c++", "cpp", "javascript", "js", "typescript", "ts", "rust", "compilation", "ast", "recursion", "multithreading", "garbage collection", "string", "function", "method", "class", "code", "program", "loop", "array", "list", "variable", "reverse"},
+        "Programming": {"python", "java", "c++", "cpp", "javascript", "js", "typescript", "ts", "rust", "compilation", "ast", "recursion", "multithreading", "garbage collection", "string", "function", "method", "class", "code", "program", "loop", "array", "list", "variable", "reverse", "compiler", "concurrency", "optimization", "distributed", "distributed systems", "consensus", "raft", "paxos", "memory leak", "leak", "deadlock", "race condition", "synchronization", "parallelism", "mutex", "virtual memory", "memory management", "advanced algorithms", "compiler design", "parallel distributed optimization", "compiler optimization"},
         "Databases": {"sql", "postgres", "mysql", "indexing", "normalization", "nosql", "sharding", "acid", "transaction", "isolation level", "query planner", "vector database"},
         "Distributed Systems": {"consensus", "raft", "paxos", "sharding", "replication", "consistency", "availability", "distributed", "partition", "split brain", "leader election", "consumer groups"},
         "Networking": {"tcp", "udp", "http", "dns", "latency", "bandwidth", "packet", "routing", "cidr", "socket", "tls", "ssl"},
@@ -89,7 +250,7 @@ class PredictiveRouterConfig:
         "Artificial Intelligence": {"gradient descent", "neural network", "transformer", "backpropagation", "supervised", "unsupervised", "dataset", "llm", "embeddings"},
         "Cloud": {"kubernetes", "k8s", "docker", "container", "microservices", "aws", "azure", "gcp", "serverless"},
         "Operating Systems": {"kernel", "process", "thread", "mutex", "deadlock", "virtual memory", "scheduling", "sys call", "paging"},
-        "Mathematics": {"algebra", "calculus", "derivative", "integral", "matrix", "modulo", "equation", "probability", "statistics", "combinatorics", "logic", "true", "false", "boolean", "proof", "prove", "if"},
+        "Mathematics": {"algebra", "calculus", "derivative", "integral", "matrix", "modulo", "equation", "probability", "statistics", "combinatorics", "proof", "prove", "theorem", "geometry", "trigonometry", "arithmetic", "numerical methods"},
         "Finance": {"portfolio", "projection", "depreciation", "interest", "derivative", "yield", "amortization", "compound"},
         "Science": {"physics", "chemistry", "biology", "molecule", "reaction", "formula", "velocity", "gravity"},
         "Infrastructure": {"load balancer", "reverse proxy", "cdn", "dns", "firewall", "gateway", "service mesh"}
@@ -173,6 +334,8 @@ class RouterCache:
 
 class HybridRouter:
     def __init__(self, client: LLMClient = None, evaluator: ResponseEvaluator = None, cache_file: str = ".router_cache.json"):
+        PredictiveRouterConfig.load_calibrated_thresholds()
+        PredictiveRouterConfig.load_routing_weights()
         self.client = client or LLMClient()
         self.evaluator = evaluator or ResponseEvaluator(self.client)
         self.cache = RouterCache(cache_file)
@@ -230,10 +393,33 @@ class HybridRouter:
         result["prompt_tokens_local"] += self.client.estimate_tokens(query)
         result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
 
-        is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
+        eval_result = self.evaluator.evaluate(query, local_res, response_format, schema)
+        is_valid = eval_result.passed if hasattr(eval_result, 'passed') else eval_result[0]
+        error_reason = ""
+        if not is_valid:
+            if hasattr(eval_result, 'critical_failures') and eval_result.critical_failures:
+                error_reason = eval_result.critical_failures[0]
+            elif hasattr(eval_result, 'failure_reasons') and eval_result.failure_reasons:
+                error_reason = eval_result.failure_reasons[0]
+            else:
+                error_reason = eval_result[1] if len(eval_result) > 1 else ""
 
-        if not is_valid and max_retries > 0 and "Execution error" not in error_reason:
-            print(f"   [Router] Repairing ({error_reason})...")
+        # Fast path: if evaluation passed, return immediately
+        if is_valid:
+            return local_res, True, ""
+
+        # Estimate repair confidence
+        complexity_score = result.get("_complexity_score", 0.3)
+        repair_confidence = self._estimate_repair_confidence(
+            query, local_res, error_reason, complexity_score, eval_result
+        )
+        
+        if repair_confidence < 0.5:
+            print(f"   [Router] Skipping repair (confidence={repair_confidence:.2f} < 0.50, error: {error_reason})")
+            return local_res, False, error_reason
+
+        if max_retries > 0 and "Execution error" not in error_reason:
+            print(f"   [Router] Repairing (confidence={repair_confidence:.2f}, error: {error_reason})...")
             schema_hint = f"|{schema}" if schema else ""
             for attempt in range(1, max_retries + 1):
                 time.sleep(0.5)
@@ -252,7 +438,18 @@ class HybridRouter:
                 )
                 result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
 
-                is_valid, error_reason = self.evaluator.evaluate(query, local_res, response_format, schema)
+                eval_result = self.evaluator.evaluate(query, local_res, response_format, schema)
+                is_valid = eval_result.passed if hasattr(eval_result, 'passed') else eval_result[0]
+                if is_valid:
+                    error_reason = ""
+                else:
+                    if hasattr(eval_result, 'critical_failures') and eval_result.critical_failures:
+                        error_reason = eval_result.critical_failures[0]
+                    elif hasattr(eval_result, 'failure_reasons') and eval_result.failure_reasons:
+                        error_reason = eval_result.failure_reasons[0]
+                    else:
+                        error_reason = eval_result[1] if len(eval_result) > 1 else ""
+                        
                 if is_valid:
                     print(f"   {S.good('[Router]')} Repaired attempt {S.good(str(attempt))}!")
                     break
@@ -260,6 +457,46 @@ class HybridRouter:
                     print(f"   {S.warn('[Router]')} Attempt {attempt} failed ({S.warn(error_reason)}).")
 
         return local_res, is_valid, error_reason
+
+    def _estimate_repair_confidence(self, query: str, response: str, error_reason: str,
+                                     complexity_score: float, eval_result) -> float:
+        """
+        Estimate the probability that a local repair attempt will succeed.
+        Returns a value between 0.0 and 1.0.
+        
+        Factors:
+          - base_confidence: inversely proportional to task complexity
+          - evaluator_confidence: derived from eval quality score if available
+          - syntax_confidence: reduced for degenerate failures (loops, echoing)
+          - completeness_score: reduced for empty or very short responses
+        """
+        # Base: harder tasks are less likely to be repaired successfully
+        base_confidence = max(0.1, 1.0 - complexity_score)
+        
+        # Evaluator confidence: if quality score is available and high, repair is more likely
+        evaluator_confidence = 1.0
+        if hasattr(eval_result, 'quality_score') and eval_result.quality_score is not None:
+            evaluator_confidence = 0.3 + 0.7 * eval_result.quality_score
+        
+        # Syntax confidence: degenerate failures are unlikely to self-repair
+        syntax_confidence = 1.0
+        error_lower = error_reason.lower() if error_reason else ""
+        if "repetitive" in error_lower or "loop" in error_lower:
+            syntax_confidence = 0.1
+        elif "echo" in error_lower or "prompt" in error_lower:
+            syntax_confidence = 0.15
+        elif "too short" in error_lower or "empty" in error_lower:
+            syntax_confidence = 0.2
+        
+        # Completeness: very short responses are likely degenerate
+        completeness_score = 1.0
+        if response and len(response.strip()) < 20:
+            completeness_score = 0.3
+        elif response and len(response.strip()) < 50:
+            completeness_score = 0.6
+            
+        confidence = base_confidence * evaluator_confidence * syntax_confidence * completeness_score
+        return max(0.0, min(1.0, confidence))
 
     def _handle_remote_call(self, query: str, result: dict):
         """Call remote API, update result in place. Returns the response."""
@@ -366,7 +603,8 @@ class HybridRouter:
                     result["cost_saved"] = self._compute_cost_saved(result)
 
         elif strategy == "predictive":
-            is_complex = self._predict_complexity(query, response_format)
+            is_complex, pred_report = self._predict_complexity(query, response_format)
+            result["_complexity_score"] = pred_report.normalized_score
 
             if is_complex:
                 result["route_chosen"] = "remote"
@@ -463,20 +701,39 @@ class HybridRouter:
         count, _ = self._get_entities(query, query_lower)
         return count
 
-    def _get_tech_depth_count(self, query_lower: str) -> int:
-        """Count key technical terms appearing across all registered domains in O(N) time."""
+    def _get_tech_depth_count(self, query_lower: str) -> float:
+        """Calculate weighted tech depth score from matched keywords and phrases."""
         words = set(re.findall(r'\b\w+\b', query_lower))
-        count = 0
-        for domain in PredictiveRouterConfig.DOMAIN_KEYWORDS:
-            # Intersect with words in query to match whole words
-            word_set = self._domain_word_sets.get(domain, set())
-            count += len(words.intersection(word_set))
-            
-            # Count multi-word keywords
-            pattern = self._domain_phrase_patterns.get(domain)
-            if pattern:
-                count += len(pattern.findall(query_lower))
-        return count
+        score = 0.0
+        matched_keywords = set()
+        
+        # Check phrase match first to prioritize larger composite terms
+        for term, weight in sorted(PredictiveRouterConfig.KEYWORD_WEIGHTS.items(), key=lambda x: len(x[0]), reverse=True):
+            if ' ' in term or '-' in term:
+                if term in query_lower:
+                    score += weight
+                    # Mask words in matched phrases so they don't get double counted
+                    for part in term.split():
+                        matched_keywords.add(part)
+            else:
+                if term in words and term not in matched_keywords:
+                    score += weight
+                    matched_keywords.add(term)
+                    
+        # Fall back to general domain keywords that are not explicitly weighted (default weight 1.0)
+        for domain, keyword_set in self._domain_word_sets.items():
+            for kw in words.intersection(keyword_set):
+                if kw not in matched_keywords:
+                    score += 1.0
+                    matched_keywords.add(kw)
+            phrases = self._domain_phrases_list.get(domain, [])
+            for phrase in phrases:
+                if phrase in query_lower and phrase not in matched_keywords:
+                    score += 1.0
+                    for part in phrase.split():
+                        matched_keywords.add(part)
+                        
+        return score
 
     def _estimate_output_size(self, query_lower: str, word_count: int) -> str:
         """Predict output length based on deliverables and query length using precompiled patterns."""
@@ -502,20 +759,26 @@ class HybridRouter:
             else:
                 if r in words:
                     depth += 1
-                    
-        if words.intersection({"true", "false", "logic"}):
-            depth += 1
             
         return depth
 
     def _get_math_matches(self, query_lower: str) -> int:
-        """Count occurrences of mathematical symbols and terms."""
+        """Count occurrences of mathematical symbols and terms, avoiding false positives on text punctuation."""
         count = 0
         words = set(re.findall(r'\b\w+\b', query_lower))
         
         for sym in PredictiveRouterConfig.MATH_SYMBOLS:
             if len(sym) == 1:
-                if sym in query_lower:
+                escaped_sym = re.escape(sym)
+                if sym == '-':
+                    # Require spaces around hyphen or at least one digit
+                    pattern = rf'(?:\b\d+\s*{escaped_sym}\s*\d+\b)|(?:\b[a-zA-Z]\s+{escaped_sym}\s+[a-zA-Z]\b)|(?:\b\d+\s*{escaped_sym}\s+[a-zA-Z]\b)|(?:\b[a-zA-Z]\s*{escaped_sym}\s*\d+\b)'
+                elif sym == '/':
+                    # Require spaces or digit context to avoid path/URL match like "json/xml" or "http://"
+                    pattern = rf'(?:\b\d+\s*{escaped_sym}\s*\d+\b)|(?:\b[a-zA-Z]\s+{escaped_sym}\s+[a-zA-Z]\b)'
+                else:
+                    pattern = rf'(?:\b\d+|\b[a-zA-Z])\s*{escaped_sym}\s*(?:\d+\b|[a-zA-Z]\b)'
+                if re.search(pattern, query_lower):
                     count += 1
             else:
                 if sym in words:
@@ -630,45 +893,101 @@ class HybridRouter:
                 pass
         return has_large_doc
 
-    def _calculate_risk_score(self, query_lower: str, response_format: str, math_matches: int, matched_domains: list[str]) -> float:
-        """Assess the probability of local model output failure (raw score sum)."""
-        risk_score = 0.0
+    def _calculate_risk_score(self, query_lower: str, response_format: str, math_matches: int, matched_domains: list[str], features: RoutingFeatures = None) -> tuple[float, dict[str, float], dict[str, float]]:
+        """Assess the probability of local model output failure using continuous weighted scaling."""
         
-        # Risk: JSON output requirement
-        if response_format.lower() == "json" or "json" in query_lower:
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["format_json"]
+        # 1. Access configurations
+        weights = PredictiveRouterConfig.RISK_COMPONENTS_WEIGHTS
+        norm_constants = PredictiveRouterConfig.RISK_NORMALIZATION
+        
+        # 2. Extract continuously scaled features
+        tech_depth = features.tech_depth if features else 0.0
+        is_coding = "Programming" in matched_domains or response_format.lower() in ("python", "json")
+        if is_coding:
+            norm_tech_depth = min(tech_depth / norm_constants.get("tech_depth", 5.0), 1.0)
+        else:
+            norm_tech_depth = 0.0
             
-        # Risk: Complex math arithmetic
-        if math_matches > 0 or "Mathematics" in matched_domains:
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["math_reasoning"]
+        reasoning_depth = features.reasoning_depth if features else 0
+        norm_reasoning_depth = min(reasoning_depth / norm_constants.get("reasoning_depth", 5.0), 1.0)
+        
+        ambiguity_count = features.ambiguity_count if features else 0
+        norm_ambiguity = min(ambiguity_count / norm_constants.get("ambiguity", 3.0), 1.0)
+        
+        constraint_count = features.constraint_count if features else 0
+        norm_constraint_density = min(constraint_count / norm_constants.get("constraint_density", 5.0), 1.0)
+        
+        output_size = (features.output_size if features else "medium").lower()
+        if output_size == "high":
+            norm_output_size = 1.0
+        elif output_size == "medium":
+            norm_output_size = 0.5
+        else:
+            norm_output_size = 0.1
             
-        # Risk: Code generation (especially non-Python compile targets)
-        if self._has_non_python_language(query_lower):
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["code_generation"]
-        elif "Programming" in matched_domains:
-            if self._is_programming_debugging(query_lower, matched_domains):
-                risk_score += PredictiveRouterConfig.RISK_WEIGHTS["code_debugging"]
-            else:
-                risk_score += 2.0  # Python/generic code gen
-                
-        # Risk: Distributed consensus concurrency conflicts
-        if self._has_distributed_systems_indicators(query_lower, matched_domains):
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["distributed_systems"]
+        norm_math = min(math_matches / norm_constants.get("math_reasoning", 3.0), 1.0)
+        if "Mathematics" in matched_domains:
+            norm_math = max(norm_math, 0.5)
             
-        # Risk: Crossover domains context drift
-        if len(matched_domains) > 2:
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["multi_domain"]
+        # 3. Dynamic Evaluator Confidence (predicted from historical stats)
+        from .evaluator import (
+            ComparisonEvaluator, SummarizationEvaluator, ArchitectureEvaluator,
+            DebuggingEvaluator, JSONEvaluator, PythonEvaluator, CodeGenerationEvaluator
+        )
+        
+        applicable_evals = []
+        if ComparisonEvaluator.is_applicable(query_lower):
+            applicable_evals.append("ComparisonEvaluator")
+        if SummarizationEvaluator.is_applicable(query_lower):
+            applicable_evals.append("SummarizationEvaluator")
+        if ArchitectureEvaluator.is_applicable(query_lower):
+            applicable_evals.append("ArchitectureEvaluator")
+        if DebuggingEvaluator.is_applicable(query_lower):
+            applicable_evals.append("DebuggingEvaluator")
+        if JSONEvaluator.is_applicable(response_format):
+            applicable_evals.append("JSONEvaluator")
+        if PythonEvaluator.is_applicable(response_format):
+            applicable_evals.append("PythonEvaluator")
+        if CodeGenerationEvaluator.is_applicable(query_lower, response_format):
+            applicable_evals.append("CodeGenerationEvaluator")
             
-        # Risk: Constraint density or large document reference
-        constraint_count = self._get_constraint_count(query_lower)
-        if constraint_count > 2 or self._has_large_document(query_lower):
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["strict_constraints"]
+        if not applicable_evals:
+            applicable_evals.append("GenericTextEvaluator")
             
-        # Risk: Logical reasoning puzzle
-        if "logic" in query_lower or ("true" in query_lower and "false" in query_lower):
-            risk_score += PredictiveRouterConfig.RISK_WEIGHTS["math_reasoning"]
-            
-        return risk_score
+        success_rates = [
+            PredictiveRouterConfig.EVALUATOR_HISTORICAL_SUCCESS.get(name, 0.95)
+            for name in applicable_evals
+        ]
+        predicted_eval_confidence = sum(success_rates) / len(success_rates) if success_rates else 0.95
+        norm_evaluator_uncertainty = 1.0 - predicted_eval_confidence
+        
+        # 4. JSON structure and distributed systems indicators
+        norm_json = 1.0 if (response_format.lower() == "json" or "json" in query_lower) else 0.0
+        is_distributed = "Distributed Systems" in matched_domains or any(keyword in query_lower for keyword in ["raft", "paxos", "consensus", "distributed", "concurrency", "multithreading", "thread-safe", "mutex", "race condition"])
+        norm_distributed = 1.0 if is_distributed else 0.0
+        
+        # 5. Weighted combination of risk contributions
+        contributions = {
+            "tech_depth": norm_tech_depth * weights.get("tech_depth", 3.0),
+            "reasoning_depth": norm_reasoning_depth * weights.get("reasoning_depth", 2.5),
+            "ambiguity": norm_ambiguity * weights.get("ambiguity", 2.0),
+            "constraint_density": norm_constraint_density * weights.get("constraint_density", 2.0),
+            "output_size": norm_output_size * weights.get("output_size", 1.5),
+            "math_reasoning": norm_math * weights.get("math_reasoning", 2.0),
+            "evaluator_uncertainty": norm_evaluator_uncertainty * weights.get("evaluator_uncertainty", 2.5),
+            "distributed_systems": norm_distributed * weights.get("distributed_systems", 1.5),
+            "json_formatting": norm_json * weights.get("json_formatting", 1.0)
+        }
+        
+        weighted_sum = sum(contributions.values())
+        total_weight = sum(weights.values())
+        
+        normalized_risk = weighted_sum / total_weight if total_weight > 0 else 0.0
+        
+        # Calculate raw feature scores showing each component's contribution
+        risk_components = {k: round(v / total_weight, 4) if total_weight > 0 else 0.0 for k, v in contributions.items()}
+        
+        return normalized_risk, risk_components, dict(weights)
 
     def _get_expected_failure_modes(self, query_lower: str, response_format: str, math_matches: int, matched_domains: list[str]) -> list[str]:
         """Detail estimated failure types based on triggered risk indices."""
@@ -819,6 +1138,16 @@ class HybridRouter:
             features.append("complexity_non_python")
         return score, features
 
+    def _evaluate_complexity_python(self, query_lower: str, response_format: str) -> tuple[float, list[str]]:
+        """Evaluate direct complexity score increase from Python target language coding query."""
+        score = 0.0
+        features = []
+        if response_format.lower() == "python" or "python" in query_lower:
+            score += PredictiveRouterConfig.COMPLEXITY_WEIGHTS["tech_depth"]
+            features.append("complexity_python")
+        return score, features
+
+
     def _evaluate_complexity_debugging(self, query_lower: str, matched_domains: list[str]) -> tuple[float, list[str]]:
         """Evaluate direct complexity score increase from programming debugging or fixing code queries."""
         score = 0.0
@@ -857,6 +1186,29 @@ class HybridRouter:
         # 1. Intermediate O(N) extraction to RoutingFeatures
         features = self.extract_routing_features(query, response_format)
         
+        # Initialize default feature scores for all features to 0.0
+        feature_scores = {
+            f"task_count_crossover({features.task_count})": 0.0,
+            f"constraints({features.constraint_count})": 0.0,
+            f"multi_entity({features.entities_count})": 0.0,
+            f"tech_depth({features.tech_depth})": 0.0,
+            "output_size_high": 0.0,
+            "output_size_medium": 0.0,
+            f"ambiguity({features.ambiguity_count})": 0.0,
+            f"reasoning_depth({features.reasoning_depth})": 0.0,
+            f"math_references({features.math_matches})": 0.0,
+            f"domain_breadth({len(features.matched_domains)})": 0.0,
+            "length_long": 0.0,
+            "length_medium": 0.0,
+            "lexical_diversity_high": 0.0,
+            "complexity_math": 0.0,
+            "complexity_non_python": 0.0,
+            "complexity_python": 0.0,
+            "complexity_debugging": 0.0,
+            "complexity_distributed_systems": 0.0,
+            "complexity_large_document": 0.0
+        }
+        
         # 2. Score mapping
         score = 0.0
         matched_features = []
@@ -876,6 +1228,7 @@ class HybridRouter:
             self._evaluate_lexical_diversity(word_count, tokens_set),
             self._evaluate_complexity_math(features.math_matches, features.matched_domains),
             self._evaluate_complexity_non_python(query_lower),
+            self._evaluate_complexity_python(query_lower, response_format),
             self._evaluate_complexity_debugging(query_lower, features.matched_domains),
             self._evaluate_complexity_distributed_systems(query_lower, features.matched_domains),
             self._evaluate_complexity_large_document(query_lower)
@@ -884,36 +1237,77 @@ class HybridRouter:
         for feat_score, feat_names in evaluators:
             score += feat_score
             matched_features.extend(feat_names)
+            for name in feat_names:
+                feature_scores[name] = feat_score
             
         # 3. Dynamic Normalization boundary
         max_possible = sum(PredictiveRouterConfig.COMPLEXITY_WEIGHTS.values())
         normalized_score = min(score / max_possible, 1.0)
-        
-        # 4. Risk estimation (normalized against highest possible single category weight)
-        risk_score_raw = self._calculate_risk_score(query_lower, response_format, features.math_matches, features.matched_domains)
-        max_risk_weight = max(PredictiveRouterConfig.RISK_WEIGHTS.values())
-        risk_score = min(risk_score_raw / max_risk_weight, 1.0) if max_risk_weight > 0 else 0.0
+        # 4. Risk estimation
+        risk_score, risk_components, risk_weights = self._calculate_risk_score(
+            query_lower, 
+            response_format, 
+            features.math_matches, 
+            features.matched_domains, 
+            features=features
+        )
         expected_failure_modes = self._get_expected_failure_modes(query_lower, response_format, features.math_matches, features.matched_domains)
         
         # 5. Three-Zone model
+        threshold_used = 0.0
+        explanation_parts = []
         if normalized_score < PredictiveRouterConfig.ZONE_LOCAL_LIMIT:
             routing_zone = "Definitely Local"
             decision = "local"
+            threshold_used = PredictiveRouterConfig.ZONE_LOCAL_LIMIT
+            explanation_parts.append(f"Normalized score {normalized_score:.2f} is below Definitely Local limit ({PredictiveRouterConfig.ZONE_LOCAL_LIMIT:.2f}).")
         elif normalized_score >= PredictiveRouterConfig.ZONE_REMOTE_LIMIT:
             routing_zone = "Definitely Remote"
             decision = "remote"
+            threshold_used = PredictiveRouterConfig.ZONE_REMOTE_LIMIT
+            explanation_parts.append(f"Normalized score {normalized_score:.2f} is at or above Definitely Remote limit ({PredictiveRouterConfig.ZONE_REMOTE_LIMIT:.2f}).")
         else:
             routing_zone = "Borderline"
+            explanation_parts.append(f"Normalized score {normalized_score:.2f} is in Borderline zone [{PredictiveRouterConfig.ZONE_LOCAL_LIMIT:.2f}, {PredictiveRouterConfig.ZONE_REMOTE_LIMIT:.2f}).")
             if risk_score >= PredictiveRouterConfig.RISK_THRESHOLD:
                 decision = "remote"
+                threshold_used = PredictiveRouterConfig.RISK_THRESHOLD
+                explanation_parts.append(f"Risk score {risk_score:.2f} is at or above threshold ({PredictiveRouterConfig.RISK_THRESHOLD:.2f}). Routing to remote.")
             else:
                 decision = "local"
+                threshold_used = PredictiveRouterConfig.RISK_THRESHOLD
+                explanation_parts.append(f"Risk score {risk_score:.2f} is below threshold ({PredictiveRouterConfig.RISK_THRESHOLD:.2f}). Routing to local.")
                 
         # Confidence logic based on normalized threshold distance
         threshold = (PredictiveRouterConfig.ZONE_LOCAL_LIMIT + PredictiveRouterConfig.ZONE_REMOTE_LIMIT) / 2.0
         max_distance = max(threshold, 1.0 - threshold)
         distance = abs(normalized_score - threshold)
         confidence = 0.5 + 0.5 * (distance / max_distance)
+        
+        explanation = " ".join(explanation_parts)
+        
+        diagnostics = RoutingDiagnostics(
+            query=query,
+            total_complexity_score=score,
+            feature_scores=feature_scores,
+            selected_route=decision,
+            threshold_used=threshold_used,
+            explanation=explanation,
+            feature_contributions_version=1,
+            feature_contributions={
+                "tech_depth": float(features.tech_depth),
+                "math_score": float(features.math_matches),
+                "reasoning_depth": float(features.reasoning_depth),
+                "constraint_score": float(features.constraint_count),
+                "task_count": float(features.task_count),
+                "ambiguity": float(features.ambiguity_count),
+                "entity_count": float(features.entities_count),
+                "complexity": float(normalized_score),
+                "risk": float(risk_score),
+            },
+            risk_components=risk_components,
+            risk_weights=risk_weights
+        )
         
         return ComplexityReport(
             score=score,
@@ -931,18 +1325,16 @@ class HybridRouter:
             expected_failure_modes=expected_failure_modes,
             matched_entities=features.matched_entities,
             comp_entities_count=features.comp_entities_count,
-            comparison_count=features.comparison_count
+            comparison_count=features.comparison_count,
+            diagnostics=diagnostics
         )
 
-    def _predict_complexity(self, query: str, response_format: str = "text") -> bool:
+    def _predict_complexity(self, query: str, response_format: str = "text") -> tuple:
         """
         Predicts query complexity using fast, rule-based heuristics to avoid
         local LLM classification overhead (saving CPU/GPU resources).
+        Returns (is_complex: bool, report: ComplexityReport).
         """
-        # If format is python, route to remote immediately as small local models are not reliable for coding
-        if response_format.lower() == "python":
-            return True
-
         report = self.analyze_complexity(query, response_format)
         
         print(f"\n   [Predictive Router] Complexity & Risk Analysis:")
@@ -951,8 +1343,11 @@ class HybridRouter:
         print(f"      - Subtasks: {report.estimated_task_count} | Output Size: {report.estimated_output_size}")
         print(f"      - Matched Domains: {report.matched_domains}")
         print(f"      - Matched Features: {report.matched_features}")
+        if report.diagnostics and report.diagnostics.risk_components:
+            print(f"      - Risk Components: {report.diagnostics.risk_components}")
+            print(f"      - Risk Weights: {report.diagnostics.risk_weights}")
         if report.expected_failure_modes:
             print(f"      - Predicted Local Failure Modes: {report.expected_failure_modes}")
         print()
 
-        return report.decision == "remote"
+        return report.decision == "remote", report

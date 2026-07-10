@@ -5,12 +5,13 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama (linux-amd64 binary)
-RUN curl -L https://ollama.com/download/ollama-linux-amd64.tgz -o ollama.tgz \
-    && tar -C /usr -xzf ollama.tgz \
-    && rm ollama.tgz
+RUN curl -L https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst \
+    && tar --zstd -xf ollama.tar.zst -C /usr \
+    && rm ollama.tar.zst
 
 # Set the working directory in the container
 WORKDIR /app
