@@ -1,6 +1,8 @@
 # Use an official Python runtime as a parent image
 FROM python:3.10-slim
 
+LABEL org.opencontainers.image.source="https://github.com/rimmon1234/llm-routing-agent"
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
