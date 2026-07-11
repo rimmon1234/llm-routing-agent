@@ -37,7 +37,8 @@ class LLMClient:
         if fireworks_api_key:
             self.remote_client = OpenAI(
                 base_url=fireworks_base_url,
-                api_key=fireworks_api_key
+                api_key=fireworks_api_key,
+                timeout=25.0
             )
         else:
             print("Warning: FIREWORKS_API_KEY is not set. Remote routing calls will fail.")
@@ -56,6 +57,9 @@ class LLMClient:
         
         # Remote model pricing per 1M tokens (defaults to $0.90 per 1M tokens for Llama 3.1 70B)
         self.remote_price_per_1m_tokens = float(os.getenv("REMOTE_PRICE_PER_1M_TOKENS", "0.90"))
+
+        # Initialize token encoder cache
+        self._encoding = None
 
         # Detect AMD GPU availability
         self.gpu_info = self.detect_gpu()
@@ -141,15 +145,22 @@ class LLMClient:
         Estimate the token count for a given text using tiktoken.
         Falls back to a character-based heuristic if tiktoken fails.
         """
+        if self._encoding is None:
+            try:
+                print("[tiktoken] Loading cl100k_base encoding...", flush=True)
+                self._encoding = tiktoken.get_encoding("cl100k_base")
+                print("[tiktoken] cl100k_base encoding loaded successfully.", flush=True)
+            except Exception as e:
+                print(f"[tiktoken] Warning: Failed to load encoding: {e}. Falling back to character heuristic.", flush=True)
+                return len(text) // 4 + 1
+        
         try:
-            # Use cl100k_base encoding which is the default for most modern models
-            encoding = tiktoken.get_encoding("cl100k_base")
-            return len(encoding.encode(text))
-        except Exception:
-            # Fallback: ~4 characters per token (common heuristic)
+            return len(self._encoding.encode(text))
+        except Exception as e:
+            print(f"[tiktoken] Warning: Failed to encode text: {e}. Falling back to character heuristic.", flush=True)
             return len(text) // 4 + 1
 
-    def call_local(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 1000, json_mode: bool = False) -> str:
+    def call_local(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 600, json_mode: bool = False) -> str:
         """
         Sends a query to the local model via Ollama.
         """

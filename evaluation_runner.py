@@ -63,11 +63,11 @@ def run_evaluation():
 
         print(f"   [{idx}/{total_tasks}] Routing Task ID: {task_id}")
         try:
-            # We use 'fallback' strategy as our default evaluation strategy
+            # We use 'predictive' strategy as our default evaluation strategy
             # Output format is text by default, let's let the router handle it
             res = router.route_and_execute(
                 query=prompt,
-                strategy="fallback",
+                strategy="predictive",
                 response_format="text"
             )
             answer = res.get("response", "")

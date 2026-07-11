@@ -340,6 +340,11 @@ class HybridRouter:
         self.evaluator = evaluator or ResponseEvaluator(self.client)
         self.cache = RouterCache(cache_file)
         self._precompile_patterns()
+        self.debug_timing = os.getenv("ROUTER_DEBUG_TIMING") == "1"
+
+    def _debug_print_timing(self, message: str) -> None:
+        if self.debug_timing:
+            print(f"   [Timing] {message}", flush=True)
 
     def _precompile_patterns(self) -> None:
         """Precompile and cache regexes and lookup structures to optimize matching performance to O(N)."""
@@ -389,11 +394,26 @@ class HybridRouter:
                                use_json_mode: bool, max_retries: int, result: dict) -> tuple:
         """Run local model with retry loop. Updates result in place. Returns (response, is_valid, error_reason)."""
         result["local_attempts"] += 1
+        
+        t0 = time.perf_counter()
         local_res = self.client.call_local(query, json_mode=use_json_mode)
-        result["prompt_tokens_local"] += self.client.estimate_tokens(query)
-        result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
+        t1 = time.perf_counter()
+        self._debug_print_timing(f"Local generation took {t1 - t0:.2f}s")
 
+        t_tok0 = time.perf_counter()
+        pt_tokens = self.client.estimate_tokens(query)
+        ct_tokens = self.client.estimate_tokens(local_res)
+        t_tok1 = time.perf_counter()
+        self._debug_print_timing(f"Token estimation took {t_tok1 - t_tok0:.3f}s")
+
+        result["prompt_tokens_local"] += pt_tokens
+        result["completion_tokens_local"] += ct_tokens
+
+        t_eval0 = time.perf_counter()
         eval_result = self.evaluator.evaluate(query, local_res, response_format, schema)
+        t_eval1 = time.perf_counter()
+        self._debug_print_timing(f"Local validation evaluation took {t_eval1 - t_eval0:.2f}s")
+
         is_valid = eval_result.passed if hasattr(eval_result, 'passed') else eval_result[0]
         error_reason = ""
         if not is_valid:
@@ -429,16 +449,35 @@ class HybridRouter:
                     q=query, r=local_res, e=error_reason,
                     fmt=response_format, schema=schema_hint
                 )
-                result["prompt_tokens_local"] += self.client.estimate_tokens(repair_prompt)
+                
+                t_tok_rep0 = time.perf_counter()
+                pt_rep = self.client.estimate_tokens(repair_prompt)
+                t_tok_rep1 = time.perf_counter()
+                self._debug_print_timing(f"Repair attempt {attempt} token estimation took {t_tok_rep1 - t_tok_rep0:.3f}s")
+                
+                result["prompt_tokens_local"] += pt_rep
 
+                t_rep0 = time.perf_counter()
                 local_res = self.client.call_local(
                     prompt=repair_prompt,
                     temperature=0.1,
                     json_mode=use_json_mode
                 )
-                result["completion_tokens_local"] += self.client.estimate_tokens(local_res)
+                t_rep1 = time.perf_counter()
+                self._debug_print_timing(f"Repair attempt {attempt} generation took {t_rep1 - t_rep0:.2f}s")
+                
+                t_tok_rep_c0 = time.perf_counter()
+                ct_rep = self.client.estimate_tokens(local_res)
+                t_tok_rep_c1 = time.perf_counter()
+                self._debug_print_timing(f"Repair attempt {attempt} completion token estimation took {t_tok_rep_c1 - t_tok_rep_c0:.3f}s")
 
+                result["completion_tokens_local"] += ct_rep
+
+                t_eval_rep0 = time.perf_counter()
                 eval_result = self.evaluator.evaluate(query, local_res, response_format, schema)
+                t_eval_rep1 = time.perf_counter()
+                self._debug_print_timing(f"Repair attempt {attempt} validation took {t_eval_rep1 - t_eval_rep0:.2f}s")
+
                 is_valid = eval_result.passed if hasattr(eval_result, 'passed') else eval_result[0]
                 if is_valid:
                     error_reason = ""
@@ -501,7 +540,12 @@ class HybridRouter:
     def _handle_remote_call(self, query: str, result: dict):
         """Call remote API, update result in place. Returns the response."""
         result["remote_attempts"] += 1
+        
+        t0 = time.perf_counter()
         res, pt, ct = self.client.call_remote(query)
+        t1 = time.perf_counter()
+        self._debug_print_timing(f"Remote Fireworks API call took {t1 - t0:.2f}s")
+        
         result["prompt_tokens_remote"] = pt
         result["completion_tokens_remote"] = ct
         result["response"] = res
@@ -631,6 +675,7 @@ class HybridRouter:
                         result["cost_saved"] = self._compute_cost_saved(result)
 
         result["latency_sec"] = time.perf_counter() - start_time
+        self._debug_print_timing(f"Total route_and_execute request took {result['latency_sec']:.2f}s")
 
         # Save to cache if no errors and caching is allowed
         if not no_cache and result["response"]:

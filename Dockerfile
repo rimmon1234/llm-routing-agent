@@ -22,6 +22,11 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download tiktoken vocabulary to prevent runtime download timeout in offline environment
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken_cache
+RUN mkdir -p /app/tiktoken_cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 # Copy the rest of the application code
 COPY . .
 
@@ -33,6 +38,7 @@ RUN (ollama serve &) && sleep 5 && ollama pull llama3.2:3b
 ENV OLLAMA_HOST=http://127.0.0.1:11434
 ENV LOCAL_MODEL=llama3.2:3b
 ENV REMOTE_MODEL=accounts/fireworks/models/deepseek-v3p2
+ENV ROUTER_DEBUG_TIMING=1
 
 # Ensure entrypoint is executable and has Unix line endings (safe for Windows checkouts)
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
