@@ -16,8 +16,11 @@ def run_evaluation():
         input_path = "./input/tasks.json"
         output_path = "./output/results.json"
 
-    # Fallback to interactive CLI if input file is not present (local dev mode)
+    # Fallback to interactive CLI if input file is not present (local dev mode only, not inside container)
     if not os.path.exists(input_path):
+        if os.path.exists("/.dockerenv") or os.getenv("DOCKER_CONTAINER") == "1" or not sys.stdin.isatty():
+            print(f"❌ Error: Input file {input_path} not found. Exiting with code 1.")
+            sys.exit(1)
         print(f"ℹ️ Input file {input_path} not found. Falling back to interactive CLI main.py...")
         import subprocess
         # Pass CLI args along if any

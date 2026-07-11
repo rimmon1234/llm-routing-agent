@@ -43,6 +43,7 @@ ENV LOCAL_MODEL=llama3.2:3b
 ENV REMOTE_MODEL=accounts/fireworks/models/deepseek-v3p2
 ENV ROUTER_DEBUG_TIMING=1
 ENV HOME=/tmp
+ENV DOCKER_CONTAINER=1
 
 # Ensure entrypoint is executable and has Unix line endings (safe for Windows checkouts)
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh

@@ -12,3 +12,5 @@ routing_analysis.csv
 output/
 input/benchmark_dataset.json
 *.log
+.env
+.env*

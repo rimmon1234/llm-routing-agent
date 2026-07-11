@@ -7,7 +7,7 @@ ollama serve > /tmp/ollama.log 2>&1 &
 
 # Wait for Ollama to be active and listening
 echo "⏳ Waiting for Ollama server to boot..."
-STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-55}
+STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-40}
 START_TIME=$(date +%s)
 while true; do
     if curl -s http://127.0.0.1:11434/ >/dev/null; then
@@ -22,6 +22,10 @@ while true; do
     fi
     sleep 1
 done
+
+# Verify that the model is loaded and present
+echo "📦 Available local models:"
+ollama list
 
 # Run the evaluation runner
 echo "🚀 Running the evaluation runner..."

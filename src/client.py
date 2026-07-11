@@ -47,8 +47,17 @@ class LLMClient:
         allowed_models_env = os.getenv("ALLOWED_MODELS")
         if allowed_models_env:
             allowed_models = [m.strip() for m in allowed_models_env.split(",") if m.strip()]
-            if allowed_models:
-                # Use the first permitted model as our primary remote model
+            # Filter allowed models: the remote model is usually a Fireworks model (has '/' or contains 'accounts')
+            # and is not our local model name.
+            remote_candidates = [m for m in allowed_models if "/" in m or "accounts" in m]
+            if not remote_candidates:
+                # Fallback: remote candidate is any model in ALLOWED_MODELS that isn't our local model
+                remote_candidates = [m for m in allowed_models if m != self.local_model]
+            
+            if remote_candidates:
+                self.remote_model = remote_candidates[0]
+            elif allowed_models:
+                # If no remote candidate was identified, use the first allowed model
                 self.remote_model = allowed_models[0]
             else:
                 self.remote_model = os.getenv("REMOTE_MODEL", "accounts/fireworks/models/deepseek-v4-pro")
