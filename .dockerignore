@@ -1,0 +1,14 @@
+.venv/
+.git/
+.github/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.router_cache.json
+evaluation_stats.json
+routing_analysis.csv
+output/
+input/benchmark_dataset.json
+*.log
