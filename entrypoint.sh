@@ -3,7 +3,7 @@ set -e
 
 # Start Ollama in the background
 echo "🦙 Starting local Ollama server in background..."
-ollama serve > /var/log/ollama.log 2>&1 &
+ollama serve > /tmp/ollama.log 2>&1 &
 
 # Wait for Ollama to be active and listening
 echo "⏳ Waiting for Ollama server to boot..."
