@@ -74,6 +74,11 @@ def run_evaluation():
                 response_format="text"
             )
             answer = res.get("response", "")
+            print(f"   Task {task_id}")
+            print(f"   Generation: {res.get('generation_latency_sec', 0.0):.1f}s")
+            print(f"   Evaluation: {res.get('evaluation_latency_sec', 0.0):.2f}s")
+            print(f"   Total: {res.get('latency_sec', 0.0):.1f}s")
+            print()
         except Exception as e:
             print(f"❌ Error during routing Task {task_id}: {e}")
             answer = f"Error generating answer: {str(e)}"

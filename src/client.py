@@ -2,15 +2,20 @@ import os
 import re
 import subprocess
 import tiktoken
+import openai
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
+class RemoteModelError(Exception):
+    """Custom exception raised when the remote API call fails."""
+    pass
+
 class LLMClient:
     def __init__(self):
         # Local client configuration (Ollama)
-        local_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip('/')
+        local_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip('/')
         self.local_client = OpenAI(
             base_url=f"{local_host}/v1",
             api_key="ollama",  # Ollama doesn't require a key but OpenAI client expects a non-empty string
@@ -70,90 +75,21 @@ class LLMClient:
         # Initialize token encoder cache
         self._encoding = None
 
-        # Detect AMD GPU availability
-        self.gpu_info = self.detect_gpu()
-
-    def detect_gpu(self) -> dict:
-        """
-        Detect AMD GPU availability and return hardware info.
-        Gracefully degrades on non-AMD systems (Mac, Intel, etc.).
-        Returns dict with keys: available, name, vram_gb, driver.
-        """
-        info = {
+        # GPU info (Statically disabled to avoid subprocess/startup overhead)
+        self.gpu_info = {
             "available": False,
-            "name": "",
-            "vram_gb": 0,
-            "driver": "",
-            "backend": "cpu"
+            "backend": "cpu",
+            "name": "Unknown"
         }
-
-        # Method 1: rocminfo (most reliable for ROCm systems)
-        try:
-            result = subprocess.run(
-                ["rocminfo"], capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                info["available"] = True
-                info["backend"] = "rocm"
-                # Parse GPU name from rocminfo output
-                for line in result.stdout.split('\n'):
-                    if "Marketing Name:" in line:
-                        name = line.split(":", 1)[1].strip()
-                        if name and "AMD" in name:
-                            info["name"] = name
-                    elif "Device Type:" in line and "GPU" in line:
-                        pass  # Confirms GPU device
-                # Try to get VRAM from rocminfo
-                for line in result.stdout.split('\n'):
-                    if "Pool Size:" in line:
-                        match = re.search(r'(\d+(?:\.\d+)?)\s*(MB|GB)', line)
-                        if match:
-                            val = float(match.group(1))
-                            unit = match.group(2)
-                            info["vram_gb"] = int(val / 1024) if unit == "MB" else int(val)
-                            break
-        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
-            pass  # rocminfo not available — not an AMD ROCm system
-
-        # Method 2: Check via torch (ROCm PyTorch reports HIP via torch.cuda)
-        if not info["available"]:
-            try:
-                import torch
-                if torch.cuda.is_available() and hasattr(torch.version, 'hip'):
-                    info["available"] = True
-                    info["backend"] = "rocm"
-                    info["name"] = torch.cuda.get_device_name(0)
-                    try:
-                        info["vram_gb"] = torch.cuda.get_device_properties(0).total_memory // (1024**3)
-                    except Exception:
-                        pass
-                    info["driver"] = f"ROCm (HIP) {torch.version.hip or 'unknown'}"
-            except ImportError:
-                pass  # PyTorch not installed
-
-        # Method 3: Check via rocm-smi (alternative ROCm tool)
-        if not info["available"]:
-            try:
-                result = subprocess.run(
-                    ["rocm-smi", "--showproductname"], capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    info["available"] = True
-                    info["backend"] = "rocm"
-                    for line in result.stdout.split('\n'):
-                        if line.strip() and "=" in line:
-                            info["name"] = line.split("=")[-1].strip()
-                            break
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-
-        return info
 
     def estimate_tokens(self, text: str) -> int:
         """
         Estimate the token count for a given text using tiktoken.
         Falls back to a character-based heuristic if tiktoken fails.
         """
+        if os.getenv("DOCKER_CONTAINER") == "1" or os.getenv("SKIP_LOCAL_TOKEN_COUNT") == "1":
+            return 0
+
         if self._encoding is None:
             try:
                 print("[tiktoken] Loading cl100k_base encoding...", flush=True)
@@ -169,7 +105,7 @@ class LLMClient:
             print(f"[tiktoken] Warning: Failed to encode text: {e}. Falling back to character heuristic.", flush=True)
             return len(text) // 4 + 1
 
-    def call_local(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 600, json_mode: bool = False) -> str:
+    def call_local(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 400, json_mode: bool = False) -> str:
         """
         Sends a query to the local model via Ollama.
         """
@@ -182,19 +118,16 @@ class LLMClient:
         if json_mode:
             kwargs["response_format"] = {"type": "json"}
 
-        try:
-            response = self.local_client.chat.completions.create(
-                model=self.local_model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Error executing local query: {str(e)}"
+        response = self.local_client.chat.completions.create(
+            model=self.local_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs
+        )
+        return response.choices[0].message.content
 
-    def call_remote(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 1000) -> tuple[str, int, int]:
+    def call_remote(self, prompt: str, system_prompt: str = None, temperature: float = 0.2, max_tokens: int = 400) -> tuple[str, int, int]:
         """
         Sends a query to the remote Fireworks API.
         Returns:
@@ -219,5 +152,5 @@ class LLMClient:
             prompt_tokens = usage.prompt_tokens if usage else 0
             completion_tokens = usage.completion_tokens if usage else 0
             return response.choices[0].message.content, prompt_tokens, completion_tokens
-        except Exception as e:
-            return f"Error executing remote query: {str(e)}", 0, 0
+        except openai.OpenAIError as e:
+            raise RemoteModelError(f"Remote API call failed: {e}") from e

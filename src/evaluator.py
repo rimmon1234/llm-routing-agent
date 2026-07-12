@@ -1177,19 +1177,37 @@ class ResponseEvaluator:
         query_lower = query.lower()
         response_lower = response.lower()
 
-        if any(term in query_lower for term in ["one sentence", "single sentence", "1 sentence"]):
+        # 1. Check for sentence count constraint
+        sentence_count_match = re.search(r'\b(?:exactly|in exactly)\s+(\w+|\d+)\s+sentences?\b', query_lower)
+        if not sentence_count_match:
+            if any(term in query_lower for term in ["one sentence", "single sentence", "1 sentence", "one-sentence", "1-sentence"]):
+                target_sentences = 1
+            else:
+                target_sentences = None
+        else:
+            val = sentence_count_match.group(1)
+            num_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6}
+            target_sentences = num_map.get(val)
+
+        if target_sentences is not None:
             chunks = re.split(r'(?<=[.!?])\s+', response.strip())
             valid_chunks = [c for c in chunks if len(c.strip()) > 3]
-            if len(valid_chunks) > 1:
-                return False, f"Response contains multiple sentences ({len(valid_chunks)}) when only one was requested."
+            if len(valid_chunks) != target_sentences:
+                if target_sentences == 1:
+                    return False, f"Response contains multiple sentences ({len(valid_chunks)}) when only one was requested."
+                else:
+                    return False, f"Response contains {len(valid_chunks)} sentences when exactly {target_sentences} were requested."
 
+        # 2. Check word count limits across whole response (if no bullet point check is performed)
         limit_match = re.search(r'\b(?:under|less\s+than|below|max|maximum\s+of|limit\s+of)\s+(\d+)\s+words\b', query_lower)
         if not limit_match:
             limit_match = re.search(r'\b(\d+)\s+words\s+(?:or\s+less|max|maximum|limit)\b', query_lower)
         if not limit_match:
             limit_match = re.search(r'\bin\s+(?:under|less\s+than|below|max|maximum\s+of)?\s*(\d+)\s+words\b', query_lower)
         
-        if limit_match:
+        # We only apply whole-response word limit check if there is no bullet point count check
+        bullet_count_match = re.search(r'\b(?:exactly|in exactly)\s+(\w+|\d+)\s+(?:bullet\s+points|bullets)\b', query_lower)
+        if limit_match and not bullet_count_match:
             try:
                 max_words = int(limit_match.group(1))
                 word_count = len(response.split())
@@ -1198,12 +1216,31 @@ class ResponseEvaluator:
             except ValueError:
                 pass
 
-        if any(term in query_lower for term in ["bullet point", "bullet list", "bulleted list", "numbered list", "list form"]):
-            lines = response.split('\n')
-            has_list = any(re.match(r'^\s*(?:[-*+]+|\d+\.)\s+', line) for line in lines)
-            if not has_list:
+        # 3. Check for bullet list format & count
+        if any(term in query_lower for term in ["bullet point", "bullet list", "bulleted list", "numbered list", "list form"]) or bullet_count_match:
+            lines = [l.strip() for l in response.split('\n') if l.strip()]
+            bullets = [l for l in lines if re.match(r'^\s*(?:[-*+]+|\d+\.)\s+', l)]
+            if not bullets:
                 return False, "Response does not use bullet points or list formatting as requested."
+                
+            if bullet_count_match:
+                val = bullet_count_match.group(1)
+                num_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5}
+                target_bullets = num_map.get(val)
+                if target_bullets is not None and len(bullets) != target_bullets:
+                    return False, f"Response contains {len(bullets)} bullet points when exactly {target_bullets} were requested."
+                
+                # Check for word length limits per bullet point (e.g. "each no longer than 15 words")
+                length_match = re.search(r'\b(?:no\s+longer\s+than|under|less\s+than|max|maximum)\s+(\d+)\s+words\b', query_lower)
+                if length_match:
+                    max_bullet_words = int(length_match.group(1))
+                    for idx, bullet in enumerate(bullets, 1):
+                        clean_bullet = re.sub(r'^\s*(?:[-*+]+|\d+\.)\s+', '', bullet)
+                        words_count = len(clean_bullet.split())
+                        if words_count > max_bullet_words:
+                            return False, f"Bullet point {idx} exceeds length limit: {words_count} words (limit: {max_bullet_words})."
 
+        # 4. Check for sentiment classification justification
         if "sentiment" in query_lower:
             needs_justification = any(term in query_lower for term in ["justify", "justification", "explain", "why"])
             if needs_justification:

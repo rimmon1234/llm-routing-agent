@@ -10,6 +10,17 @@ from .style import S
 # Compact repair prompt (no system prompt needed — the repair prompt is self-contained)
 _REPAIR_TMPL = "Q:{q}\nA:{r}\nERR:{e}\nFix ({fmt}{schema}):"
 
+_LOCAL_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant.\n\n"
+    "Follow the user's instructions exactly.\n\n"
+    "Answer directly without introductions, conclusions, or conversational filler.\n\n"
+    "Match the requested format, level of detail, and constraints.\n\n"
+    "When the prompt asks for a brief answer, keep it brief.\n"
+    "When it asks for explanation, provide only the necessary explanation.\n\n"
+    "Verify calculations before responding. If arithmetic is involved, recompute the final answer before producing it.\n\n"
+    "Do not add markdown headings, summaries, or extra information unless requested."
+)
+
 @dataclass
 class RoutingDiagnostics:
     query: str
@@ -318,6 +329,8 @@ class RouterCache:
         return self.cache.get(key)
 
     def set(self, query: str, strategy: str, response_format: str, schema: str, entry: dict):
+        if os.getenv("DOCKER_CONTAINER") == "1":
+            return
         normalized_query = self._normalize_query(query)
         key = f"{normalized_query}||{strategy}||{response_format}||{schema or ''}"
         self.cache[key] = entry
@@ -396,8 +409,9 @@ class HybridRouter:
         result["local_attempts"] += 1
         
         t0 = time.perf_counter()
-        local_res = self.client.call_local(query, json_mode=use_json_mode)
+        local_res = self.client.call_local(query, system_prompt=_LOCAL_SYSTEM_PROMPT, json_mode=use_json_mode)
         t1 = time.perf_counter()
+        result["generation_latency_sec"] += (t1 - t0)
         self._debug_print_timing(f"Local generation took {t1 - t0:.2f}s")
 
         t_tok0 = time.perf_counter()
@@ -412,6 +426,7 @@ class HybridRouter:
         t_eval0 = time.perf_counter()
         eval_result = self.evaluator.evaluate(query, local_res, response_format, schema)
         t_eval1 = time.perf_counter()
+        result["evaluation_latency_sec"] += (t_eval1 - t_eval0)
         self._debug_print_timing(f"Local validation evaluation took {t_eval1 - t_eval0:.2f}s")
 
         is_valid = eval_result.passed if hasattr(eval_result, 'passed') else eval_result[0]
@@ -442,7 +457,6 @@ class HybridRouter:
             print(f"   [Router] Repairing (confidence={repair_confidence:.2f}, error: {error_reason})...")
             schema_hint = f"|{schema}" if schema else ""
             for attempt in range(1, max_retries + 1):
-                time.sleep(0.5)
                 result["local_attempts"] += 1
 
                 repair_prompt = _REPAIR_TMPL.format(
@@ -544,6 +558,7 @@ class HybridRouter:
         t0 = time.perf_counter()
         res, pt, ct = self.client.call_remote(query)
         t1 = time.perf_counter()
+        result["generation_latency_sec"] += (t1 - t0)
         self._debug_print_timing(f"Remote Fireworks API call took {t1 - t0:.2f}s")
         
         result["prompt_tokens_remote"] = pt
@@ -562,7 +577,7 @@ class HybridRouter:
         total = local_tok + remote_tok
         return local_tok / total if total > 0 else 0.0
 
-    def route_and_execute(self, query: str, strategy: str = "fallback", response_format: str = "text", schema: any = None, max_retries: int = 2, no_cache: bool = False) -> dict:
+    def route_and_execute(self, query: str, strategy: str = "fallback", response_format: str = "text", schema: any = None, max_retries: int = None, no_cache: bool = False) -> dict:
         """
         Routes the query based on the strategy and returns execution logs and output.
 
@@ -575,6 +590,9 @@ class HybridRouter:
         start_time = time.perf_counter()
         schema_str = str(schema) if schema is not None else None
 
+        if max_retries is None:
+            max_retries = int(os.getenv("MAX_RETRIES", "0"))
+
         # Cap retries for small models (1b or 3b) to prevent local resource spikes
         model_lower = self.client.local_model.lower()
         if "1b" in model_lower or "3b" in model_lower:
@@ -586,6 +604,8 @@ class HybridRouter:
                 result = cached_result.copy()
                 result.setdefault("prompt_tokens_local", 0)
                 result.setdefault("completion_tokens_local", 0)
+                result.setdefault("generation_latency_sec", 0.0)
+                result.setdefault("evaluation_latency_sec", 0.0)
                 result["cached"] = True
                 result["latency_sec"] = time.perf_counter() - start_time
                 return result
@@ -605,7 +625,9 @@ class HybridRouter:
             "cost_saved": 0.0,
             "latency_sec": 0.0,
             "cost_dollars": 0.0,
-            "cached": False
+            "cached": False,
+            "generation_latency_sec": 0.0,
+            "evaluation_latency_sec": 0.0
         }
 
         use_json_mode = (response_format.lower() == "json")
@@ -613,7 +635,9 @@ class HybridRouter:
         if strategy == "always_local":
             result["route_chosen"] = "local"
             result["local_attempts"] = 1
-            result["response"] = self.client.call_local(query, json_mode=use_json_mode)
+            t_gen0 = time.perf_counter()
+            result["response"] = self.client.call_local(query, system_prompt=_LOCAL_SYSTEM_PROMPT, json_mode=use_json_mode)
+            result["generation_latency_sec"] += (time.perf_counter() - t_gen0)
             result["prompt_tokens_local"] = self.client.estimate_tokens(query)
             result["completion_tokens_local"] = self.client.estimate_tokens(result["response"])
             result["cost_saved"] = 1.0
