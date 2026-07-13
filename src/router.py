@@ -216,7 +216,7 @@ class PredictiveRouterConfig:
         "length_medium": 1.5,
         "length_long": 3.0,
         "diversity": 1.0,
-        "math_symbol": 2.5,
+        "math_symbol": 1.2,
         "reasoning": 2.5,
         "domain_breadth": 2.0
     }
@@ -242,7 +242,7 @@ class PredictiveRouterConfig:
 
     # 3. RISK FEATURE WEIGHTS (Likelihood of local model failure)
     RISK_WEIGHTS = {
-        "math_reasoning": 4.5,
+        "math_reasoning": 2.5,
         "code_generation": 4.0,
         "code_debugging": 3.5,
         "strict_constraints": 3.0,

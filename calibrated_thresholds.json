@@ -11,9 +11,9 @@
       "RISK_THRESHOLD": 0.35
     },
     "calibrated_thresholds": {
-      "ZONE_LOCAL_LIMIT": 0.3,
+      "ZONE_LOCAL_LIMIT": 0.35,
       "ZONE_REMOTE_LIMIT": 0.55,
-      "RISK_THRESHOLD": 0.35
+      "RISK_THRESHOLD": 0.45
     },
     "metrics_before_calibration": {
       "oracle_routing_accuracy": 0.4666666666666667,
@@ -34,7 +34,7 @@
       "remote_routing_percentage": 56.666666666666664
     }
   },
-  "ZONE_LOCAL_LIMIT": 0.3,
+  "ZONE_LOCAL_LIMIT": 0.35,
   "ZONE_REMOTE_LIMIT": 0.55,
-  "RISK_THRESHOLD": 0.35
+  "RISK_THRESHOLD": 0.45
 }

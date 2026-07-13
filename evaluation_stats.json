@@ -1,32 +1,32 @@
 {
   "PythonEvaluator": {
-    "success_count": 24,
-    "total_count": 27,
-    "success_rate": 0.8889
+    "success_count": 39,
+    "total_count": 95,
+    "success_rate": 0.4105
   },
   "CodeGenerationEvaluator": {
-    "success_count": 78,
-    "total_count": 81,
-    "success_rate": 0.963
+    "success_count": 125,
+    "total_count": 280,
+    "success_rate": 0.4464
   },
   "DebuggingEvaluator": {
-    "success_count": 27,
-    "total_count": 27,
-    "success_rate": 1.0
+    "success_count": 47,
+    "total_count": 111,
+    "success_rate": 0.4234
   },
   "ArchitectureEvaluator": {
-    "success_count": 3,
-    "total_count": 3,
-    "success_rate": 1.0
+    "success_count": 5,
+    "total_count": 8,
+    "success_rate": 0.625
   },
   "GenericTextEvaluator": {
-    "success_count": 46,
-    "total_count": 46,
-    "success_rate": 1.0
+    "success_count": 85,
+    "total_count": 131,
+    "success_rate": 0.6489
   },
   "ComparisonEvaluator": {
-    "success_count": 2,
-    "total_count": 2,
+    "success_count": 4,
+    "total_count": 4,
     "success_rate": 1.0
   }
 }

@@ -16,10 +16,11 @@ class LLMClient:
     def __init__(self):
         # Local client configuration (Ollama)
         local_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip('/')
+        local_timeout = float(os.getenv("OLLAMA_TIMEOUT", "60.0"))
         self.local_client = OpenAI(
             base_url=f"{local_host}/v1",
             api_key="ollama",  # Ollama doesn't require a key but OpenAI client expects a non-empty string
-            timeout=20.0       # Timeout to prevent hanging if Ollama freezes
+            timeout=local_timeout  # Configurable timeout to allow loading/inference on CPU
         )
         self.local_model = os.getenv("LOCAL_MODEL", "llama3.2:3b")
 
@@ -39,11 +40,12 @@ class LLMClient:
         fireworks_api_key = os.getenv("FIREWORKS_API_KEY")
         fireworks_base_url = os.getenv("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1")
         self.remote_client = None
+        remote_timeout = float(os.getenv("FIREWORKS_TIMEOUT", "60.0"))
         if fireworks_api_key:
             self.remote_client = OpenAI(
                 base_url=fireworks_base_url,
                 api_key=fireworks_api_key,
-                timeout=25.0
+                timeout=remote_timeout
             )
         else:
             print("Warning: FIREWORKS_API_KEY is not set. Remote routing calls will fail.")

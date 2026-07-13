@@ -36,7 +36,7 @@ COPY . .
 # Pre-download the local model during the build stage so it is baked in
 # This ensures container starts and is ready in under 5 seconds (Hackathon 60s rule)
 ENV OLLAMA_MODELS=/app/ollama_models
-RUN (ollama serve &) && sleep 5 && ollama pull llama3.2:3b
+RUN (ollama serve &) && (for i in $(seq 1 30); do curl -s http://127.0.0.1:11434/ >/dev/null && break; sleep 1; done) && ollama pull llama3.2:3b
 RUN chmod -R 777 /app/ollama_models
 
 # Set default environment variables (overridden by harness at runtime)
